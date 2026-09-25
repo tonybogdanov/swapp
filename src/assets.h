@@ -3,13 +3,19 @@
 
 #include <stddef.h>
 
-/* Bundled fonts and icons live next to the executable, not at a path fixed
- * at build time: the app is run straight out of its build directory, so
- * resolving relative to the running binary is the only thing that works in
- * both that case and an installed one.
- *
- * Writes the absolute path of `relative` (e.g. "icons/check.png") into buf.
- * Returns nonzero on success. */
-int swapp_asset_path(const char *relative, char *buf, size_t buf_size);
+/* Bundled fonts and icons are compiled into the binary (see
+ * cmake/embed_assets.cmake), so a release is a single file with nothing to
+ * unpack next to it. */
+typedef struct {
+    const char *name; /* path under assets/, '/'-separated, e.g. "icons/check.png" */
+    const unsigned char *data;
+    size_t size;
+} swapp_asset;
+
+extern const swapp_asset swapp_assets[];
+extern const size_t swapp_asset_count;
+
+/* Looks up `name` (e.g. "icons/check.png"). Returns NULL if it isn't bundled. */
+const swapp_asset *swapp_asset_find(const char *name);
 
 #endif

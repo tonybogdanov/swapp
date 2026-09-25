@@ -456,14 +456,58 @@ static guint g_spinner_source = 0;
 /* Loads the bundled Inter face for this process only, then makes it the
  * app's font. Deliberately not installed system-wide: the app should look
  * the same on a machine where the user has never heard of Inter, without
- * touching anything outside its own directory. */
+ * touching anything outside its own cache directory. */
+static int swapp_font_add(const char *name) {
+    const swapp_asset *asset = swapp_asset_find(name);
+    if (!asset) {
+        return 0;
+    }
+
+    /* Fontconfig only registers fonts from files, so the embedded face is
+     * written out once and reused; rewritten only if the bundled one changed. */
+    char *base = g_path_get_basename(name);
+    char *dir = g_build_filename(g_get_user_cache_dir(), "swapp", "fonts", NULL);
+    char *path = g_build_filename(dir, base, NULL);
+    int ok = 0;
+
+    gchar *existing = NULL;
+    gsize existing_size = 0;
+    int current = g_file_get_contents(path, &existing, &existing_size, NULL)
+                  && existing_size == asset->size
+                  && memcmp(existing, asset->data, asset->size) == 0;
+    g_free(existing);
+
+    if (current || (g_mkdir_with_parents(dir, 0700) == 0
+                    && g_file_set_contents(path, (const gchar *)asset->data,
+                                           (gssize)asset->size, NULL))) {
+        ok = FcConfigAppFontAddFile(NULL, (const FcChar8 *)path);
+    }
+
+    g_free(path);
+    g_free(dir);
+    g_free(base);
+    return ok;
+}
+
+/* Decodes an embedded PNG, scaled to fit width x height. */
+static GdkPixbuf *swapp_pixbuf_from_asset(const char *name, int width, int height) {
+    const swapp_asset *asset = swapp_asset_find(name);
+    if (!asset) {
+        return NULL;
+    }
+    GInputStream *stream = g_memory_input_stream_new_from_data(asset->data, (gssize)asset->size,
+                                                               NULL);
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_stream_at_scale(stream, width, height, TRUE, NULL,
+                                                            NULL);
+    g_object_unref(stream);
+    return pixbuf;
+}
+
 static void swapp_font_load(void) {
     static const char *const faces[] = {"fonts/Inter-Regular.ttf", "fonts/Inter-SemiBold.ttf"};
     int loaded = 0;
     for (guint i = 0; i < G_N_ELEMENTS(faces); i++) {
-        char path[PATH_MAX];
-        if (swapp_asset_path(faces[i], path, sizeof(path))
-            && FcConfigAppFontAddFile(NULL, (const FcChar8 *)path)) {
+        if (swapp_font_add(faces[i])) {
             loaded = 1;
         }
     }
@@ -512,13 +556,9 @@ static void swapp_icon_load_at(swapp_icon which, int pixels) {
         "icons/spinner.png", "icons/check.png", "icons/error.png", "icons/refresh.png",
         "icons/check.png", "icons/windows.png", "icons/linux.png"};
     g_clear_object(&g_icons[which]);
-    char path[PATH_MAX];
-    if (!swapp_asset_path(files[which], path, sizeof(path))) {
-        return;
-    }
     /* A missing icon is not fatal: the text lines still say everything the
      * icons do. */
-    g_icons[which] = gdk_pixbuf_new_from_file_at_size(path, pixels, pixels, NULL);
+    g_icons[which] = swapp_pixbuf_from_asset(files[which], pixels, pixels);
 }
 
 static void swapp_icons_load(void) {
@@ -854,13 +894,9 @@ static cairo_surface_t *swapp_table_logo_surface(GtkWidget *view, swapp_owner ow
     surface_scales[owner] = scale;
 
     swapp_icon icon = owner == SWAPP_OWNER_LINUX ? SWAPP_ICON_LINUX : SWAPP_ICON_WINDOWS;
-    char path[PATH_MAX];
-    if (!swapp_asset_path(owner == SWAPP_OWNER_LINUX ? "icons/linux.png" : "icons/windows.png",
-                          path, sizeof(path))) {
-        return NULL;
-    }
     int pixels = swapp_table_logo_size(owner) * scale;
-    GdkPixbuf *source = gdk_pixbuf_new_from_file_at_size(path, pixels, pixels, NULL);
+    GdkPixbuf *source = swapp_pixbuf_from_asset(
+        owner == SWAPP_OWNER_LINUX ? "icons/linux.png" : "icons/windows.png", pixels, pixels);
     if (!source) {
         return NULL;
     }

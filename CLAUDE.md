@@ -4,18 +4,13 @@ Cross-platform desktop app for Windows and Linux.
 
 ## Build and run
 
-Two scripts per OS, named `z_*` only so they sort below the source
-directories:
+There are no local build scripts. Every push to `main` builds both OSes in
+GitHub Actions (`.github/workflows/release.yml`) and replaces the single
+release, `swapp`, with the two binaries; older releases, runs and artifacts are
+deleted so only the latest build exists.
 
-- `z_install-deps.sh` / `z_install-deps.ps1` -- installs the toolchain and
-  system packages. Needs sudo (Linux) or an elevated shell (Windows). Run once
-  per machine; agents should not run these.
-- `z_run.sh` / `z_run.ps1` -- kills the running instance, builds, starts the
-  new binary. No elevation: the build itself never needs it.
-
-Each time the agent implements a change, it runs the `z_run` script for the
-current OS. It is incremental, so it is cheap to run on every change; wipe the
-build directory by hand if CMake's cache ever needs resetting.
+Assets are compiled into the binary (`cmake/embed_assets.cmake`), so each
+release file is the whole app.
 
 ## Modes
 

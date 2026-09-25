@@ -1,7 +1,7 @@
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
 
-# CMake build trees (one per OS, see z_run.*).
+# CMake build trees (one per OS, as the release workflow names them).
 /build-windows/
 /build-linux/
 

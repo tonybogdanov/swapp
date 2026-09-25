@@ -1,6 +1,6 @@
-# Builds swapp for Windows (server) and Linux (client), publishes both as the
-# only release, then deletes every other release, tag, workflow run and
-# artifact so the repo only ever holds the latest build.
+# Builds swapp for Windows (server) and Linux (client) and publishes both
+# single-file binaries as the one release, "swapp", after deleting every
+# older release, tag, workflow run and artifact.
 name: release
 
 on:
@@ -36,18 +36,10 @@ jobs:
           cmake --build build-windows
           if ($LASTEXITCODE -ne 0) { throw "Build failed." }
 
-      # The app loads assets/ from beside the binary, so they ship together.
-      - name: Package
-        run: |
-          New-Item -ItemType Directory -Force dist/swapp | Out-Null
-          Copy-Item build-windows/swapp.exe dist/swapp/
-          Copy-Item -Recurse build-windows/assets dist/swapp/
-          Compress-Archive -Path dist/swapp -DestinationPath swapp-windows-x64.zip
-
       - uses: actions/upload-artifact@v4
         with:
           name: swapp-windows
-          path: swapp-windows-x64.zip
+          path: build-windows/swapp.exe
           retention-days: 1
 
   build-linux:
@@ -69,17 +61,10 @@ jobs:
           cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build-linux
 
-      - name: Package
-        run: |
-          mkdir -p dist/swapp
-          cp build-linux/swapp dist/swapp/
-          cp -r build-linux/assets dist/swapp/
-          tar -C dist -czf swapp-linux-x64.tar.gz swapp
-
       - uses: actions/upload-artifact@v4
         with:
           name: swapp-linux
-          path: swapp-linux-x64.tar.gz
+          path: build-linux/swapp
           retention-days: 1
 
   release:
@@ -88,29 +73,32 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      TAG: build-${{ github.run_number }}
+      TAG: swapp
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Publish release
-        run: |
-          gh release create "$TAG" dist/* \
-            --target "$GITHUB_SHA" \
-            --title "swapp build ${{ github.run_number }}" \
-            --notes "Built from ${GITHUB_SHA::7}." \
-            --latest
-
-      - name: Delete older releases and their tags
+      # Every release goes first, so the tag is free for the new one.
+      - name: Delete old releases and their tags
         run: |
           gh release list --limit 1000 --json tagName --jq '.[].tagName' |
             while read -r tag; do
-              [ "$tag" = "$TAG" ] && continue
               echo "Deleting release $tag"
-              gh release delete "$tag" --cleanup-tag --yes || true
+              gh release delete "$tag" --cleanup-tag --yes
             done
+          # Also a tag left behind without its release.
+          gh api "repos/$GH_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 &&
+            gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG" || true
+
+      - name: Publish release
+        run: |
+          gh release create "$TAG" dist/swapp.exe dist/swapp \
+            --target "$GITHUB_SHA" \
+            --title "swapp" \
+            --notes "Built from ${GITHUB_SHA::7}." \
+            --latest
 
       # Everything is in the release now; this run's own artifacts included.
       - name: Delete all artifacts

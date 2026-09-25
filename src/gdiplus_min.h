@@ -23,7 +23,8 @@ typedef struct {
 
 typedef GpStatus (WINAPI *GdiplusStartup_t)(ULONG_PTR *, const GdiplusStartupInput *, void *);
 typedef GpStatus (WINAPI *GdiplusShutdown_t)(ULONG_PTR);
-typedef GpStatus (WINAPI *GdipCreateBitmapFromFile_t)(const WCHAR *, GpBitmap **);
+/* The stream is an IStream over the embedded PNG (SHCreateMemStream). */
+typedef GpStatus (WINAPI *GdipCreateBitmapFromStream_t)(IStream *, GpBitmap **);
 typedef GpStatus (WINAPI *GdipDisposeImage_t)(GpImage *);
 typedef GpStatus (WINAPI *GdipCreateFromHDC_t)(HDC, GpGraphics **);
 typedef GpStatus (WINAPI *GdipDeleteGraphics_t)(GpGraphics *);

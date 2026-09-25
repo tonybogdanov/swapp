@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <dbt.h>
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
 #include <stdio.h>
@@ -375,7 +376,7 @@ static int swapp_main_can_switch_all(swapp_input_role role);
 static struct {
     HMODULE module;
     ULONG_PTR token;
-    GdipCreateBitmapFromFile_t create_bitmap;
+    GdipCreateBitmapFromStream_t create_bitmap;
     GdipCreateFromHDC_t create_graphics;
     GdipDeleteGraphics_t delete_graphics;
     GdipTranslateWorldTransform_t translate;
@@ -448,7 +449,7 @@ static void swapp_icons_load(void) {
     }
 
     GdiplusStartup_t startup = (GdiplusStartup_t)swapp_gdip_proc("GdiplusStartup");
-    g_gdip.create_bitmap = (GdipCreateBitmapFromFile_t)swapp_gdip_proc("GdipCreateBitmapFromFile");
+    g_gdip.create_bitmap = (GdipCreateBitmapFromStream_t)swapp_gdip_proc("GdipCreateBitmapFromStream");
     g_gdip.create_graphics = (GdipCreateFromHDC_t)swapp_gdip_proc("GdipCreateFromHDC");
     g_gdip.delete_graphics = (GdipDeleteGraphics_t)swapp_gdip_proc("GdipDeleteGraphics");
     g_gdip.translate = (GdipTranslateWorldTransform_t)swapp_gdip_proc("GdipTranslateWorldTransform");
@@ -474,16 +475,20 @@ static void swapp_icons_load(void) {
     }
 
     static const char *const files[SWAPP_ICON_COUNT] = {
-        "icons\\spinner.png", "icons\\check.png", "icons\\error.png", "icons\\refresh.png",
-        "icons\\check.png", "icons\\windows.png", "icons\\linux.png"};
+        "icons/spinner.png", "icons/check.png", "icons/error.png", "icons/refresh.png",
+        "icons/check.png", "icons/windows.png", "icons/linux.png"};
     for (int i = 0; i < SWAPP_ICON_COUNT; i++) {
-        char path[MAX_PATH];
-        if (!swapp_asset_path(files[i], path, sizeof(path))) {
+        const swapp_asset *asset = swapp_asset_find(files[i]);
+        if (!asset) {
             continue;
         }
-        WCHAR wide[MAX_PATH];
-        MultiByteToWideChar(CP_ACP, 0, path, -1, wide, ARRAYSIZE(wide));
-        g_gdip.create_bitmap(wide, &g_icons[i]);
+        /* GDI+ reads from the stream for as long as the bitmap lives, and
+         * the icons live as long as the app, so the stream is never released. */
+        IStream *stream = SHCreateMemStream(asset->data, (UINT)asset->size);
+        if (!stream) {
+            continue;
+        }
+        g_gdip.create_bitmap(stream, &g_icons[i]);
 
         if (g_gdip.create_attributes && g_gdip.set_color_matrix
             && g_gdip.create_attributes(&g_icon_tints[i]) == 0) {
@@ -500,13 +505,15 @@ static void swapp_icons_load(void) {
 
 /* Registers the bundled Inter face for this process only -- nothing is
  * installed for the machine, so the app looks the same everywhere without
- * touching anything outside its own directory. */
+ * touching anything outside its own process. */
+static int swapp_font_add(const char *name) {
+    const swapp_asset *asset = swapp_asset_find(name);
+    DWORD count = 0;
+    return asset && AddFontMemResourceEx((void *)asset->data, (DWORD)asset->size, NULL, &count);
+}
+
 static void swapp_font_load(void) {
-    char path[MAX_PATH];
-    if (!swapp_asset_path("fonts\\Inter-Regular.ttf", path, sizeof(path))) {
-        return;
-    }
-    if (AddFontResourceExA(path, FR_PRIVATE, NULL) == 0) {
+    if (!swapp_font_add("fonts/Inter-Regular.ttf")) {
         return; /* fall back to the stock GUI font */
     }
     g_font_added = 1;
@@ -516,9 +523,7 @@ static void swapp_font_load(void) {
                          DEFAULT_PITCH | FF_DONTCARE, "Inter");
 
     /* The table header, bold to match GTK's column titles. */
-    if (swapp_asset_path("fonts\\Inter-SemiBold.ttf", path, sizeof(path))) {
-        AddFontResourceExA(path, FR_PRIVATE, NULL);
-    }
+    swapp_font_add("fonts/Inter-SemiBold.ttf");
     g_font_bold = CreateFontA(-swapp_dpi_scale(15), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Inter");

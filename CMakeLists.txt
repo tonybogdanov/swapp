@@ -4,21 +4,28 @@ project(swapp C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-add_executable(swapp src/main.c src/monitors_common.c)
+# The bundled fonts and icons are compiled in, so the binary is the whole
+# release: nothing has to sit next to it at runtime.
+file(GLOB_RECURSE SWAPP_ASSET_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/*")
+set(SWAPP_ASSETS_C "${CMAKE_CURRENT_BINARY_DIR}/assets_data.c")
+add_custom_command(
+    OUTPUT "${SWAPP_ASSETS_C}"
+    COMMAND ${CMAKE_COMMAND}
+            "-DASSETS_DIR=${CMAKE_CURRENT_SOURCE_DIR}/assets"
+            "-DOUTPUT=${SWAPP_ASSETS_C}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_assets.cmake"
+    DEPENDS ${SWAPP_ASSET_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_assets.cmake"
+    COMMENT "Embedding assets")
 
-# The bundled font and icons are loaded at runtime from beside the binary,
-# so they have to land in the build directory the app is started from.
-add_custom_command(TARGET swapp POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/assets"
-            "$<TARGET_FILE_DIR:swapp>/assets")
+add_executable(swapp src/main.c src/monitors_common.c src/assets.c "${SWAPP_ASSETS_C}")
+target_include_directories(swapp PRIVATE src)
 
 if(WIN32)
     # The manifest opts into comctl32 v6, without which the monitor table
     # renders in the pre-XP classic style.
-    target_sources(swapp PRIVATE src/tray_win.c src/monitors_win.c src/net_win.c src/assets_win.c
+    target_sources(swapp PRIVATE src/tray_win.c src/monitors_win.c src/net_win.c
                    src/swapp.manifest)
-    target_link_libraries(swapp PRIVATE shell32 user32 advapi32 dxva2 ws2_32 comctl32 uxtheme)
+    target_link_libraries(swapp PRIVATE shell32 shlwapi user32 advapi32 dxva2 ws2_32 comctl32 uxtheme)
 
     # GUI subsystem so no console window is created when the app launches,
     # while keeping a plain main() entry point (no WinMain needed).
@@ -58,7 +65,7 @@ elseif(UNIX)
         set(APPINDICATOR_CFLAGS_OTHER ${LEGACY_APPINDICATOR_CFLAGS_OTHER})
     endif()
 
-    target_sources(swapp PRIVATE src/tray_linux.c src/monitors_linux.c src/net_linux.c src/assets_linux.c)
+    target_sources(swapp PRIVATE src/tray_linux.c src/monitors_linux.c src/net_linux.c)
     target_include_directories(swapp PRIVATE ${GTK3_INCLUDE_DIRS} ${APPINDICATOR_INCLUDE_DIRS} ${LIBNOTIFY_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} ${GLIB2_INCLUDE_DIRS} ${FONTCONFIG_INCLUDE_DIRS})
     target_link_directories(swapp PRIVATE ${GTK3_LIBRARY_DIRS} ${APPINDICATOR_LIBRARY_DIRS} ${LIBNOTIFY_LIBRARY_DIRS} ${X11_LIBRARY_DIRS} ${GLIB2_LIBRARY_DIRS} ${FONTCONFIG_LIBRARY_DIRS})
     target_link_libraries(swapp PRIVATE ${GTK3_LIBRARIES} ${APPINDICATOR_LIBRARIES} ${LIBNOTIFY_LIBRARIES} ${X11_LIBRARIES} ${GLIB2_LIBRARIES} ${FONTCONFIG_LIBRARIES})
