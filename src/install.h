@@ -15,9 +15,13 @@
  * installed one overwritten, and the new one started. Running a download
  * is therefore also how the app is updated.
  *
+ * A binary downloaded by "Check for updates" runs with SWAPP_ARG_UPDATE
+ * (update.h); it then starts the installed copy with SWAPP_ARG_CLEANUP and
+ * its own path, and the installed copy deletes the download.
+ *
  * Returns nonzero when the installed copy has been started and this process
  * should exit; zero when this process is the installed copy, or installing
  * failed and it should just run from where it is. */
-int swapp_install_redirect(void);
+int swapp_install_redirect(int argc, char **argv);
 
 #endif

@@ -6,10 +6,12 @@
 #endif
 
 #include "tray.h"
+#include "mode.h"
 #include "monitors.h"
 #include "net.h"
 #include "assets.h"
 #include "gdiplus_min.h"
+#include "update.h"
 
 #include <initguid.h>
 #include <windows.h>
@@ -39,6 +41,13 @@
 #define SWAPP_ID_OPEN         1002
 #define SWAPP_ID_WINDOWS_ALL  1003
 #define SWAPP_ID_LINUX_ALL    1004
+#define SWAPP_ID_UPDATE       1005
+#define SWAPP_ID_ABOUT        1006
+/* From the update worker threads to the tray window. */
+#define SWAPP_UPDATE_CHECKED_MSG    (WM_APP + 11) /* wp: swapp_update_result */
+#define SWAPP_UPDATE_PROGRESS_MSG   (WM_APP + 12) /* wp: permille */
+#define SWAPP_UPDATE_DOWNLOADED_MSG (WM_APP + 13) /* wp: nonzero on success */
+#define SWAPP_UPDATE_CLASS    "SwappUpdateWindow"
 
 /* The main window. The monitor rows move in here once the client can drive
  * them; for now it shows the link status, which is the only thing the
@@ -1563,6 +1572,162 @@ static void swapp_main_next_screen(void) {
     SetWindowPos(g_main_hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
 }
 
+/* ---- Check for updates / About ---- */
+
+typedef enum {
+    SWAPP_UPDATE_FAILED = 0,
+    SWAPP_UPDATE_LATEST = 1,
+    SWAPP_UPDATE_NEWER = 2,
+} swapp_update_result;
+
+/* Only one check or download at a time; written on the UI thread only. */
+static int g_update_busy = 0;
+/* Written by the worker before it posts, read by the UI thread after. */
+static char g_update_latest[16];
+static char g_update_path[MAX_PATH * 3];
+static HWND g_update_hwnd = NULL;
+static HWND g_update_label = NULL;
+static HWND g_update_bar = NULL;
+
+static void swapp_tray_notify(const char *text) {
+    g_nid.uFlags |= NIF_INFO;
+    g_nid.dwInfoFlags = NIIF_INFO;
+    strncpy_s(g_nid.szInfoTitle, sizeof(g_nid.szInfoTitle), "Swapp", _TRUNCATE);
+    strncpy_s(g_nid.szInfo, sizeof(g_nid.szInfo), text, _TRUNCATE);
+    Shell_NotifyIconA(NIM_MODIFY, &g_nid);
+    g_nid.uFlags &= ~NIF_INFO;
+}
+
+static DWORD WINAPI swapp_update_check_thread(LPVOID param) {
+    HWND tray = param;
+    swapp_update_result result = SWAPP_UPDATE_FAILED;
+    if (swapp_update_fetch_latest(g_update_latest, sizeof(g_update_latest))) {
+        result = strcmp(g_update_latest, SWAPP_COMMIT) == 0 ? SWAPP_UPDATE_LATEST : SWAPP_UPDATE_NEWER;
+    }
+    PostMessageA(tray, SWAPP_UPDATE_CHECKED_MSG, result, 0);
+    return 0;
+}
+
+static void swapp_update_on_progress(unsigned long long done, unsigned long long total, void *ctx) {
+    /* Posted only when the bar would visibly move, not per 64 KiB chunk. */
+    static WPARAM last = (WPARAM)-1;
+    WPARAM permille = total ? (WPARAM)(done * 1000 / total) : 0;
+    if (permille != last) {
+        last = permille;
+        PostMessageA((HWND)ctx, SWAPP_UPDATE_PROGRESS_MSG, permille, 0);
+    }
+}
+
+static DWORD WINAPI swapp_update_download_thread(LPVOID param) {
+    HWND tray = param;
+    int ok = swapp_update_download(g_update_path, sizeof(g_update_path), swapp_update_on_progress,
+                                   tray);
+    PostMessageA(tray, SWAPP_UPDATE_DOWNLOADED_MSG, ok, 0);
+    return 0;
+}
+
+static void swapp_update_start_check(HWND tray) {
+    if (g_update_busy) {
+        return;
+    }
+    g_update_busy = 1;
+    HANDLE thread = CreateThread(NULL, 0, swapp_update_check_thread, tray, 0, NULL);
+    if (thread) {
+        CloseHandle(thread);
+    } else {
+        g_update_busy = 0;
+    }
+}
+
+/* A small fixed window: a label and a progress bar. It has no close box --
+ * the download can't be cancelled, and once done the app is replaced. */
+static void swapp_update_show_progress(void) {
+    int width = swapp_dpi_scale(380);
+    int height = swapp_dpi_scale(120);
+    RECT frame = {0, 0, width, height};
+    DWORD style = WS_OVERLAPPED | WS_CAPTION;
+    AdjustWindowRect(&frame, style, FALSE);
+    int outer_w = frame.right - frame.left;
+    int outer_h = frame.bottom - frame.top;
+    g_update_hwnd = CreateWindowExA(WS_EX_TOPMOST, SWAPP_UPDATE_CLASS, "Swapp - Updating", style,
+                                    (GetSystemMetrics(SM_CXSCREEN) - outer_w) / 2,
+                                    (GetSystemMetrics(SM_CYSCREEN) - outer_h) / 2, outer_w, outer_h,
+                                    NULL, NULL, GetModuleHandleA(NULL), NULL);
+    if (!g_update_hwnd) {
+        return;
+    }
+
+    INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_PROGRESS_CLASS};
+    InitCommonControlsEx(&icc);
+
+    int margin = swapp_dpi_scale(20);
+    char text[64];
+    _snprintf_s(text, sizeof(text), _TRUNCATE, "Downloading build %s...", g_update_latest);
+    g_update_label = CreateWindowExA(0, "STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT, margin,
+                                     margin, width - 2 * margin, swapp_dpi_scale(24),
+                                     g_update_hwnd, NULL, GetModuleHandleA(NULL), NULL);
+    SendMessageA(g_update_label, WM_SETFONT,
+                 (WPARAM)(g_font ? g_font : GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+    g_update_bar = CreateWindowExA(0, PROGRESS_CLASSA, "", WS_CHILD | WS_VISIBLE, margin,
+                                   margin + swapp_dpi_scale(36), width - 2 * margin,
+                                   swapp_dpi_scale(20), g_update_hwnd, NULL,
+                                   GetModuleHandleA(NULL), NULL);
+    SendMessageA(g_update_bar, PBM_SETRANGE32, 0, 1000);
+
+    ShowWindow(g_update_hwnd, SW_SHOW);
+    SetForegroundWindow(g_update_hwnd);
+}
+
+static void swapp_update_close_progress(void) {
+    if (g_update_hwnd) {
+        DestroyWindow(g_update_hwnd);
+        g_update_hwnd = g_update_label = g_update_bar = NULL;
+    }
+}
+
+static void swapp_update_on_checked(HWND tray, swapp_update_result result) {
+    if (result == SWAPP_UPDATE_FAILED) {
+        g_update_busy = 0;
+        swapp_tray_notify("Couldn't check for updates.");
+        return;
+    }
+    if (result == SWAPP_UPDATE_LATEST) {
+        g_update_busy = 0;
+        swapp_tray_notify("You're running the latest version (" SWAPP_COMMIT ").");
+        return;
+    }
+    swapp_update_show_progress();
+    HANDLE thread = CreateThread(NULL, 0, swapp_update_download_thread, tray, 0, NULL);
+    if (thread) {
+        CloseHandle(thread);
+    } else {
+        swapp_update_close_progress();
+        g_update_busy = 0;
+        swapp_tray_notify("Couldn't download the update.");
+    }
+}
+
+static void swapp_update_on_downloaded(int ok) {
+    /* On success the new binary installs itself, which starts by asking
+     * this instance to quit -- so the window just waits to be torn down. */
+    if (ok && swapp_update_launch(g_update_path)) {
+        SetWindowTextA(g_update_label, "Installing...");
+        SendMessageA(g_update_bar, PBM_SETPOS, 1000, 0);
+        return;
+    }
+    swapp_update_close_progress();
+    g_update_busy = 0;
+    swapp_tray_notify("Couldn't download the update.");
+}
+
+static void swapp_show_about(void) {
+    MessageBoxA(NULL,
+                "Swapp (" SWAPP_MODE_NAME ")\n\n"
+                "Build " SWAPP_COMMIT "\n\n"
+                SWAPP_REPO_URL,
+                "About swapp", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+}
+
 static void swapp_tray_show_menu(HWND hwnd) {
     HMENU menu = CreatePopupMenu();
     AppendMenuA(menu, MF_STRING, SWAPP_ID_OPEN, "Open");
@@ -1572,6 +1737,10 @@ static void swapp_tray_show_menu(HWND hwnd) {
                 SWAPP_ID_WINDOWS_ALL, "Switch to Windows");
     AppendMenuA(menu, MF_STRING | (swapp_main_can_switch_all(SWAPP_ROLE_LINUX) ? 0 : MF_GRAYED), SWAPP_ID_LINUX_ALL,
                 "Switch to Linux");
+    AppendMenuA(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(menu, MF_STRING | (g_update_busy ? MF_GRAYED : 0), SWAPP_ID_UPDATE,
+                "Check for updates");
+    AppendMenuA(menu, MF_STRING, SWAPP_ID_ABOUT, "About swapp");
     AppendMenuA(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(menu, MF_STRING, SWAPP_ID_QUIT, "Quit");
 
@@ -1590,6 +1759,17 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     switch (msg) {
         case SWAPP_SHOW_MSG:
             swapp_show_main_window();
+            return 0;
+        case SWAPP_UPDATE_CHECKED_MSG:
+            swapp_update_on_checked(hwnd, (swapp_update_result)wp);
+            return 0;
+        case SWAPP_UPDATE_PROGRESS_MSG:
+            if (g_update_bar) {
+                SendMessageA(g_update_bar, PBM_SETPOS, wp, 0);
+            }
+            return 0;
+        case SWAPP_UPDATE_DOWNLOADED_MSG:
+            swapp_update_on_downloaded((int)wp);
             return 0;
         case SWAPP_TRAY_MSG:
             if (lp == WM_RBUTTONUP) {
@@ -1656,6 +1836,12 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             }
             if (LOWORD(wp) == SWAPP_ID_LINUX_ALL) {
                 swapp_main_switch_all(SWAPP_ROLE_LINUX);
+            }
+            if (LOWORD(wp) == SWAPP_ID_UPDATE) {
+                swapp_update_start_check(hwnd);
+            }
+            if (LOWORD(wp) == SWAPP_ID_ABOUT) {
+                swapp_show_about();
             }
             if (LOWORD(wp) == SWAPP_ID_QUIT) {
                 /* Quit has to work mid-job. The message loop isn't blocked
@@ -1774,6 +1960,14 @@ void swapp_tray_run(const char *tooltip) {
     icon_wc.hInstance = wc.hInstance;
     icon_wc.lpszClassName = SWAPP_ICON_CLASS;
     RegisterClassA(&icon_wc);
+
+    WNDCLASSA update_wc = {0};
+    update_wc.lpfnWndProc = DefWindowProcA;
+    update_wc.hInstance = wc.hInstance;
+    update_wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    update_wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    update_wc.lpszClassName = SWAPP_UPDATE_CLASS;
+    RegisterClassA(&update_wc);
 
     swapp_icons_load();
     /* Startup is intentionally inert for now: no monitor window, no

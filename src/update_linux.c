@@ -1,0 +1,111 @@
+#include "update.h"
+
+#include <curl/curl.h>
+#include <glib.h>
+#include <glib/gstdio.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    swapp_update_progress_fn fn;
+    void *ctx;
+} swapp_curl_progress;
+
+static int swapp_curl_on_progress(void *user, curl_off_t total, curl_off_t done, curl_off_t ul_total,
+                                  curl_off_t ul_done) {
+    (void)ul_total;
+    (void)ul_done;
+    swapp_curl_progress *progress = user;
+    if (progress->fn && done > 0) {
+        progress->fn((unsigned long long)done, (unsigned long long)total, progress->ctx);
+    }
+    return 0;
+}
+
+static size_t swapp_curl_to_string(char *data, size_t size, size_t count, void *user) {
+    GString *body = user;
+    size_t bytes = size * count;
+    if (body->len + bytes > 64) {
+        return 0; /* version.txt is a few bytes; anything bigger is wrong */
+    }
+    g_string_append_len(body, data, (gssize)bytes);
+    return bytes;
+}
+
+static gpointer swapp_curl_init_once(gpointer unused) {
+    (void)unused;
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    return NULL;
+}
+
+/* GETs `url`, following redirects (GitHub's release links bounce to a CDN
+ * host). Nonzero on a complete 2xx response. */
+static int swapp_http_get(const char *url, curl_write_callback write, void *write_ctx,
+                          swapp_update_progress_fn progress, void *progress_ctx) {
+    static GOnce once = G_ONCE_INIT;
+    g_once(&once, swapp_curl_init_once, NULL);
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        return 0;
+    }
+    swapp_curl_progress state = {progress, progress_ctx};
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "swapp");
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L); /* runs on a worker thread */
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    if (write) { /* NULL: libcurl's default, fwrite to the FILE * in write_ctx */
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write);
+    }
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, write_ctx);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, swapp_curl_on_progress);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &state);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    int ok = curl_easy_perform(curl) == CURLE_OK;
+    curl_easy_cleanup(curl);
+    return ok;
+}
+
+int swapp_update_fetch_latest(char *hash, size_t hash_size) {
+    GString *body = g_string_new(NULL);
+    int ok = swapp_http_get(SWAPP_RELEASE_URL "version.txt", swapp_curl_to_string, body, NULL, NULL);
+    size_t length = ok ? strspn(body->str, "0123456789abcdef") : 0;
+    ok = length > 0 && length < hash_size;
+    if (ok) {
+        memcpy(hash, body->str, length);
+        hash[length] = '\0';
+    }
+    g_string_free(body, TRUE);
+    return ok;
+}
+
+int swapp_update_download(char *path, size_t path_size, swapp_update_progress_fn progress,
+                          void *ctx) {
+    /* The cache dir rather than /tmp: the download is executed, and /tmp is
+     * often mounted noexec on locked-down machines. */
+    char *dir = g_build_filename(g_get_user_cache_dir(), "swapp", NULL);
+    char *file = g_build_filename(dir, "swapp-update", NULL);
+    int ok = 0;
+
+    FILE *out = g_mkdir_with_parents(dir, 0700) == 0 ? fopen(file, "wb") : NULL;
+    if (out) {
+        ok = swapp_http_get(SWAPP_RELEASE_URL "swapp", NULL, out, progress, ctx);
+        ok = fclose(out) == 0 && ok && g_chmod(file, 0755) == 0;
+        if (ok) {
+            ok = g_strlcpy(path, file, path_size) < path_size;
+        } else {
+            g_unlink(file);
+        }
+    }
+
+    g_free(file);
+    g_free(dir);
+    return ok;
+}
+
+int swapp_update_launch(const char *path) {
+    char *argv[] = {(char *)path, SWAPP_ARG_UPDATE, NULL};
+    return g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, NULL);
+}

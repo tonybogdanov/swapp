@@ -1,5 +1,6 @@
 #include "install.h"
 #include "tray.h"
+#include "update.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -8,7 +9,17 @@
 #include <string.h>
 #include <unistd.h>
 
-int swapp_install_redirect(void) {
+int swapp_install_redirect(int argc, char **argv) {
+    const char *cleanup = NULL;
+    int from_update = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], SWAPP_ARG_UPDATE) == 0) {
+            from_update = 1;
+        } else if (strcmp(argv[i], SWAPP_ARG_CLEANUP) == 0 && i + 1 < argc) {
+            cleanup = argv[++i];
+        }
+    }
+
     char self[PATH_MAX];
     ssize_t length = readlink("/proc/self/exe", self, sizeof(self) - 1);
     if (length <= 0) {
@@ -25,6 +36,11 @@ int swapp_install_redirect(void) {
      * before comparing (~/.local/bin may itself be a symlink). */
     char resolved[PATH_MAX];
     if (realpath(target, resolved) && strcmp(resolved, self) == 0) {
+        /* Linux lets a binary be unlinked while it runs, and the download
+         * isn't running anyway: this process exec'd out of it. */
+        if (cleanup) {
+            g_unlink(cleanup);
+        }
         goto done; /* already the installed copy */
     }
 
@@ -53,8 +69,13 @@ int swapp_install_redirect(void) {
 
     /* Replacing this process rather than spawning a child: same effect as
      * exiting and starting the installed copy, with nothing left behind. */
-    char *const argv[] = {target, NULL};
-    execv(target, argv);
+    if (from_update) {
+        char *const exec_argv[] = {target, SWAPP_ARG_CLEANUP, self, NULL};
+        execv(target, exec_argv);
+    } else {
+        char *const exec_argv[] = {target, NULL};
+        execv(target, exec_argv);
+    }
     /* Only reached if execv failed: run from here instead. */
 
 done:

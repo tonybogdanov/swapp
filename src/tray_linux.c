@@ -1,7 +1,9 @@
 #include "tray.h"
+#include "mode.h"
 #include "monitors.h"
 #include "net.h"
 #include "assets.h"
+#include "update.h"
 
 /* GtkStatusIcon (the older approach) speaks only the legacy XEmbed tray
  * protocol, which modern GNOME/Ubuntu no longer implements at all -- it
@@ -1499,6 +1501,152 @@ static void swapp_tray_on_quit(GtkMenuItem *item, gpointer user_data) {
     gtk_main_quit();
 }
 
+/* ---- Check for updates / About ---- */
+
+/* Only one check or download at a time; touched on the main thread only. */
+static gboolean g_update_busy = FALSE;
+static GtkWidget *g_update_item = NULL;
+static GtkWidget *g_update_window = NULL;
+static GtkWidget *g_update_label = NULL;
+static GtkWidget *g_update_bar = NULL;
+/* Written by the worker before it hands back to the main thread. */
+static char g_update_latest[16];
+static char g_update_path[PATH_MAX];
+
+static void swapp_tray_notify(const char *text) {
+    NotifyNotification *note = notify_notification_new("Swapp", text, NULL);
+    notify_notification_show(note, NULL);
+    g_object_unref(note);
+}
+
+static void swapp_update_set_busy(gboolean busy) {
+    g_update_busy = busy;
+    gtk_widget_set_sensitive(g_update_item, !busy);
+}
+
+static void swapp_update_close_progress(void) {
+    if (g_update_window) {
+        gtk_widget_destroy(g_update_window);
+        g_update_window = g_update_label = g_update_bar = NULL;
+    }
+}
+
+static void swapp_update_fail(const char *text) {
+    swapp_update_close_progress();
+    swapp_update_set_busy(FALSE);
+    swapp_tray_notify(text);
+}
+
+static gboolean swapp_update_on_progress_idle(gpointer data) {
+    if (g_update_bar) {
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(g_update_bar),
+                                      GPOINTER_TO_UINT(data) / 1000.0);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void swapp_update_on_progress(unsigned long long done, unsigned long long total, void *ctx) {
+    (void)ctx;
+    /* Handed over only when the bar would visibly move. */
+    static guint last = G_MAXUINT;
+    guint permille = total ? (guint)(done * 1000 / total) : 0;
+    if (permille != last) {
+        last = permille;
+        g_idle_add(swapp_update_on_progress_idle, GUINT_TO_POINTER(permille));
+    }
+}
+
+static gboolean swapp_update_on_downloaded(gpointer data) {
+    /* On success the new binary installs itself, which starts by asking
+     * this instance to quit -- so the window just waits to be torn down. */
+    if (GPOINTER_TO_INT(data) && swapp_update_launch(g_update_path)) {
+        gtk_label_set_text(GTK_LABEL(g_update_label), "Installing...");
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(g_update_bar), 1.0);
+        return G_SOURCE_REMOVE;
+    }
+    swapp_update_fail("Couldn't download the update.");
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer swapp_update_download_thread(gpointer data) {
+    (void)data;
+    int ok = swapp_update_download(g_update_path, sizeof(g_update_path), swapp_update_on_progress,
+                                   NULL);
+    g_idle_add(swapp_update_on_downloaded, GINT_TO_POINTER(ok));
+    return NULL;
+}
+
+/* A small fixed window: a label and a progress bar. Closing it is refused --
+ * the download can't be cancelled, and once done the app is replaced. */
+static void swapp_update_show_progress(void) {
+    g_update_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(g_update_window), "Swapp - Updating");
+    gtk_window_set_resizable(GTK_WINDOW(g_update_window), FALSE);
+    gtk_window_set_position(GTK_WINDOW(g_update_window), GTK_WIN_POS_CENTER);
+    gtk_window_set_keep_above(GTK_WINDOW(g_update_window), TRUE);
+    g_signal_connect(g_update_window, "delete-event", G_CALLBACK(gtk_true), NULL);
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 20);
+    char *text = g_strdup_printf("Downloading build %s...", g_update_latest);
+    g_update_label = gtk_label_new(text);
+    g_free(text);
+    gtk_label_set_xalign(GTK_LABEL(g_update_label), 0.0f);
+    g_update_bar = gtk_progress_bar_new();
+    gtk_widget_set_size_request(g_update_bar, 340, -1);
+    gtk_box_pack_start(GTK_BOX(box), g_update_label, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), g_update_bar, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(g_update_window), box);
+
+    gtk_widget_show_all(g_update_window);
+    gtk_window_present(GTK_WINDOW(g_update_window));
+}
+
+static gboolean swapp_update_on_checked(gpointer data) {
+    int result = GPOINTER_TO_INT(data); /* 0 failed, 1 latest, 2 newer */
+    if (result == 0) {
+        swapp_update_fail("Couldn't check for updates.");
+    } else if (result == 1) {
+        swapp_update_set_busy(FALSE);
+        swapp_tray_notify("You're running the latest version (" SWAPP_COMMIT ").");
+    } else {
+        swapp_update_show_progress();
+        g_thread_unref(g_thread_new("swapp-update", swapp_update_download_thread, NULL));
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer swapp_update_check_thread(gpointer data) {
+    (void)data;
+    int result = 0;
+    if (swapp_update_fetch_latest(g_update_latest, sizeof(g_update_latest))) {
+        result = strcmp(g_update_latest, SWAPP_COMMIT) == 0 ? 1 : 2;
+    }
+    g_idle_add(swapp_update_on_checked, GINT_TO_POINTER(result));
+    return NULL;
+}
+
+static void swapp_tray_on_check_updates(GtkMenuItem *item, gpointer user_data) {
+    (void)item;
+    (void)user_data;
+    if (g_update_busy) {
+        return;
+    }
+    swapp_update_set_busy(TRUE);
+    g_thread_unref(g_thread_new("swapp-update-check", swapp_update_check_thread, NULL));
+}
+
+static void swapp_tray_on_about(GtkMenuItem *item, gpointer user_data) {
+    (void)item;
+    (void)user_data;
+    gtk_show_about_dialog(NULL,
+                          "program-name", "Swapp (" SWAPP_MODE_NAME ")",
+                          "version", "Build " SWAPP_COMMIT,
+                          "website", SWAPP_REPO_URL,
+                          "title", "About swapp",
+                          NULL);
+}
+
 /* One instance per user. The lock is a listening socket in the abstract
  * namespace, which the kernel drops the moment the process dies, so a crash
  * can't leave it stale the way a lock file would. The namespace is shared by
@@ -1635,6 +1783,14 @@ void swapp_tray_run(const char *tooltip) {
     g_signal_connect(monitors_item, "activate", G_CALLBACK(swapp_tray_on_show_monitors), NULL);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), monitors_item);
     */
+
+    g_update_item = gtk_menu_item_new_with_label("Check for updates");
+    g_signal_connect(g_update_item, "activate", G_CALLBACK(swapp_tray_on_check_updates), NULL);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), g_update_item);
+    GtkWidget *about_item = gtk_menu_item_new_with_label("About swapp");
+    g_signal_connect(about_item, "activate", G_CALLBACK(swapp_tray_on_about), NULL);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), about_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
 
     GtkWidget *quit_item = gtk_menu_item_new_with_label("Quit");
     g_signal_connect(quit_item, "activate", G_CALLBACK(swapp_tray_on_quit), NULL);
