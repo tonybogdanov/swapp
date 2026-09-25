@@ -4,6 +4,7 @@
 #include "net.h"
 #include "assets.h"
 #include "update.h"
+#include "autostart.h"
 
 /* GtkStatusIcon (the older approach) speaks only the legacy XEmbed tray
  * protocol, which modern GNOME/Ubuntu no longer implements at all -- it
@@ -1685,6 +1686,21 @@ static void swapp_tray_on_check_updates(GtkMenuItem *item, gpointer user_data) {
     g_thread_unref(g_thread_new("swapp-update-check", swapp_update_check_thread, NULL));
 }
 
+static void swapp_tray_on_autostart(GtkCheckMenuItem *item, gpointer user_data) {
+    (void)user_data;
+    gboolean enable = gtk_check_menu_item_get_active(item);
+    if (swapp_autostart_set(enable)) {
+        swapp_tray_notify(enable ? "Swapp will start when you log in."
+                                 : "Swapp won't start when you log in anymore.");
+        return;
+    }
+    /* Put the checkmark back without re-entering this handler. */
+    g_signal_handlers_block_by_func(item, swapp_tray_on_autostart, NULL);
+    gtk_check_menu_item_set_active(item, !enable);
+    g_signal_handlers_unblock_by_func(item, swapp_tray_on_autostart, NULL);
+    swapp_tray_notify("Couldn't change autostart.");
+}
+
 static void swapp_tray_on_about(GtkMenuItem *item, gpointer user_data) {
     (void)item;
     (void)user_data;
@@ -1832,6 +1848,13 @@ void swapp_tray_run(const char *tooltip) {
     g_signal_connect(monitors_item, "activate", G_CALLBACK(swapp_tray_on_show_monitors), NULL);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), monitors_item);
     */
+
+    /* Initial state set before the handler is connected, so it doesn't
+     * fire for it. */
+    GtkWidget *autostart_item = gtk_check_menu_item_new_with_label("Autostart");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(autostart_item), swapp_autostart_enabled());
+    g_signal_connect(autostart_item, "toggled", G_CALLBACK(swapp_tray_on_autostart), NULL);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), autostart_item);
 
     g_update_item = gtk_menu_item_new_with_label("Check for updates");
     g_signal_connect(g_update_item, "activate", G_CALLBACK(swapp_tray_on_check_updates), NULL);

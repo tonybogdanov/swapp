@@ -43,7 +43,7 @@ target_compile_definitions(swapp PRIVATE SWAPP_COMMIT="${SWAPP_COMMIT}")
 if(WIN32)
     # The manifest opts into comctl32 v6, without which the monitor table
     # renders in the pre-XP classic style.
-    target_sources(swapp PRIVATE src/tray_win.c src/monitors_win.c src/net_win.c src/install_win.c
+    target_sources(swapp PRIVATE src/tray_win.c src/monitors_win.c src/net_win.c src/install_win.c src/autostart_win.c
                    src/update_win.c src/swapp.manifest src/swapp.rc)
     target_link_libraries(swapp PRIVATE shell32 shlwapi winhttp user32 advapi32 dxva2 ws2_32 comctl32 uxtheme)
 
@@ -88,7 +88,7 @@ elseif(UNIX)
         set(APPINDICATOR_CFLAGS_OTHER ${LEGACY_APPINDICATOR_CFLAGS_OTHER})
     endif()
 
-    target_sources(swapp PRIVATE src/tray_linux.c src/monitors_linux.c src/net_linux.c src/install_linux.c src/update_linux.c)
+    target_sources(swapp PRIVATE src/tray_linux.c src/monitors_linux.c src/net_linux.c src/install_linux.c src/autostart_linux.c src/update_linux.c)
     target_include_directories(swapp PRIVATE ${GTK3_INCLUDE_DIRS} ${APPINDICATOR_INCLUDE_DIRS} ${LIBNOTIFY_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} ${GLIB2_INCLUDE_DIRS} ${FONTCONFIG_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS})
     target_link_directories(swapp PRIVATE ${GTK3_LIBRARY_DIRS} ${APPINDICATOR_LIBRARY_DIRS} ${LIBNOTIFY_LIBRARY_DIRS} ${X11_LIBRARY_DIRS} ${GLIB2_LIBRARY_DIRS} ${FONTCONFIG_LIBRARY_DIRS} ${CURL_LIBRARY_DIRS})
     target_link_libraries(swapp PRIVATE ${GTK3_LIBRARIES} ${APPINDICATOR_LIBRARIES} ${LIBNOTIFY_LIBRARIES} ${X11_LIBRARIES} ${GLIB2_LIBRARIES} ${FONTCONFIG_LIBRARIES} ${CURL_LIBRARIES})

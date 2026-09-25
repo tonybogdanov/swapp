@@ -12,6 +12,7 @@
 #include "assets.h"
 #include "gdiplus_min.h"
 #include "update.h"
+#include "autostart.h"
 
 #include <initguid.h>
 #include <windows.h>
@@ -43,6 +44,7 @@
 #define SWAPP_ID_LINUX_ALL    1004
 #define SWAPP_ID_UPDATE       1005
 #define SWAPP_ID_ABOUT        1006
+#define SWAPP_ID_AUTOSTART    1007
 /* From the update worker threads to the tray window. */
 #define SWAPP_UPDATE_CHECKED_MSG    (WM_APP + 11) /* wp: swapp_update_result */
 #define SWAPP_UPDATE_PROGRESS_MSG   (WM_APP + 12) /* wp: permille */
@@ -1884,6 +1886,8 @@ static void swapp_tray_show_menu(HWND hwnd) {
     AppendMenuA(menu, MF_STRING | (swapp_main_can_switch_all(SWAPP_ROLE_LINUX) ? 0 : MF_GRAYED), SWAPP_ID_LINUX_ALL,
                 "Switch to Linux");
     AppendMenuA(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(menu, MF_STRING | (swapp_autostart_enabled() ? MF_CHECKED : 0), SWAPP_ID_AUTOSTART,
+                "Autostart");
     AppendMenuA(menu, MF_STRING | (g_update_busy ? MF_GRAYED : 0), SWAPP_ID_UPDATE,
                 "Check for updates");
     AppendMenuA(menu, MF_STRING, SWAPP_ID_ABOUT, "About swapp");
@@ -2006,6 +2010,17 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             }
             if (LOWORD(wp) == SWAPP_ID_ABOUT) {
                 swapp_show_about();
+            }
+            if (LOWORD(wp) == SWAPP_ID_AUTOSTART) {
+                /* The menu reads the entry fresh each time it opens, so
+                 * there is no cached state to keep in step. */
+                int enable = !swapp_autostart_enabled();
+                if (!swapp_autostart_set(enable)) {
+                    swapp_tray_notify("Couldn't change autostart.");
+                } else {
+                    swapp_tray_notify(enable ? "Swapp will start with Windows."
+                                             : "Swapp won't start with Windows anymore.");
+                }
             }
             if (LOWORD(wp) == SWAPP_ID_QUIT) {
                 /* Quit has to work mid-job. The message loop isn't blocked
