@@ -1,4 +1,5 @@
 #include "update.h"
+#include "update_internal.h"
 
 #include <curl/curl.h>
 #include <glib.h>
@@ -22,13 +23,21 @@ static int swapp_curl_on_progress(void *user, curl_off_t total, curl_off_t done,
     return 0;
 }
 
-static size_t swapp_curl_to_string(char *data, size_t size, size_t count, void *user) {
-    GString *body = user;
+typedef struct {
+    char *buf;
+    size_t size;
+    size_t used;
+} swapp_mem_sink;
+
+static size_t swapp_curl_to_memory(char *data, size_t size, size_t count, void *user) {
+    swapp_mem_sink *mem = user;
     size_t bytes = size * count;
-    if (body->len + bytes > 64) {
-        return 0; /* version.txt is a few bytes; anything bigger is wrong */
+    if (mem->used + bytes >= mem->size) {
+        return 0; /* bigger than the caller allowed for */
     }
-    g_string_append_len(body, data, (gssize)bytes);
+    memcpy(mem->buf + mem->used, data, bytes);
+    mem->used += bytes;
+    mem->buf[mem->used] = '\0';
     return bytes;
 }
 
@@ -39,15 +48,23 @@ static gpointer swapp_curl_init_once(gpointer unused) {
 }
 
 /* GETs `url`, following redirects (GitHub's release links bounce to a CDN
- * host). Nonzero on a complete 2xx response. */
-static int swapp_http_get(const char *url, curl_write_callback write, void *write_ctx,
-                          swapp_update_progress_fn progress, void *progress_ctx) {
+ * host). `accept` is an optional Accept header value. Nonzero on a complete
+ * 2xx response. */
+static int swapp_http_get(const char *url, const char *accept, curl_write_callback write,
+                          void *write_ctx, swapp_update_progress_fn progress, void *progress_ctx) {
     static GOnce once = G_ONCE_INIT;
     g_once(&once, swapp_curl_init_once, NULL);
 
     CURL *curl = curl_easy_init();
     if (!curl) {
         return 0;
+    }
+    struct curl_slist *headers = NULL;
+    if (accept) {
+        char *header = g_strdup_printf("Accept: %s", accept);
+        headers = curl_slist_append(headers, header);
+        g_free(header);
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     }
     swapp_curl_progress state = {progress, progress_ctx};
     curl_easy_setopt(curl, CURLOPT_URL, url);
@@ -65,20 +82,17 @@ static int swapp_http_get(const char *url, curl_write_callback write, void *writ
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     int ok = curl_easy_perform(curl) == CURLE_OK;
     curl_easy_cleanup(curl);
+    curl_slist_free_all(headers);
     return ok;
 }
 
-int swapp_update_fetch_latest(char *hash, size_t hash_size) {
-    GString *body = g_string_new(NULL);
-    int ok = swapp_http_get(SWAPP_RELEASE_URL "version.txt", swapp_curl_to_string, body, NULL, NULL);
-    size_t length = ok ? strspn(body->str, "0123456789abcdef") : 0;
-    ok = length > 0 && length < hash_size;
-    if (ok) {
-        memcpy(hash, body->str, length);
-        hash[length] = '\0';
+int swapp_http_get_text(const char *url, const char *accept, char *buf, size_t buf_size) {
+    if (buf_size == 0) {
+        return 0;
     }
-    g_string_free(body, TRUE);
-    return ok;
+    buf[0] = '\0';
+    swapp_mem_sink mem = {buf, buf_size, 0};
+    return swapp_http_get(url, accept, swapp_curl_to_memory, &mem, NULL, NULL);
 }
 
 int swapp_update_download(char *path, size_t path_size, swapp_update_progress_fn progress,
@@ -91,7 +105,10 @@ int swapp_update_download(char *path, size_t path_size, swapp_update_progress_fn
 
     FILE *out = g_mkdir_with_parents(dir, 0700) == 0 ? fopen(file, "wb") : NULL;
     if (out) {
-        ok = swapp_http_get(SWAPP_RELEASE_URL "swapp", NULL, out, progress, ctx);
+        char *url = g_strdup_printf(SWAPP_REPO_URL "/releases/download/%s/swapp",
+                                    swapp_update_tag());
+        ok = swapp_http_get(url, NULL, NULL, out, progress, ctx);
+        g_free(url);
         ok = fclose(out) == 0 && ok && g_chmod(file, 0755) == 0;
         if (ok) {
             ok = g_strlcpy(path, file, path_size) < path_size;

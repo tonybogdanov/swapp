@@ -17,7 +17,8 @@ add_custom_command(
     DEPENDS ${SWAPP_ASSET_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_assets.cmake"
     COMMENT "Embedding assets")
 
-add_executable(swapp src/main.c src/monitors_common.c src/assets.c "${SWAPP_ASSETS_C}")
+add_executable(swapp src/main.c src/monitors_common.c src/assets.c src/update_common.c
+               "${SWAPP_ASSETS_C}")
 target_include_directories(swapp PRIVATE src)
 
 # The short commit hash is the version (no semver): About shows it, and the

@@ -1,4 +1,5 @@
 #include "update.h"
+#include "update_internal.h"
 
 #include <windows.h>
 #include <winhttp.h>
@@ -7,11 +8,20 @@
 
 typedef int (*swapp_http_sink)(const void *data, DWORD size, void *ctx);
 
-/* GETs `url` over HTTPS, following redirects (GitHub's release links bounce
- * to a CDN host; WinHTTP follows HTTPS->HTTPS by default), and streams the
- * body to `sink`. Nonzero on a complete 200 response. */
-static int swapp_http_get(const WCHAR *url, swapp_http_sink sink, void *sink_ctx,
-                          swapp_update_progress_fn progress, void *progress_ctx) {
+/* GETs `url` (UTF-8) over HTTPS, following redirects (GitHub's release
+ * links bounce to a CDN host; WinHTTP follows HTTPS->HTTPS by default), and
+ * streams the body to `sink`. `accept` is an optional Accept header value.
+ * Nonzero on a complete 200 response. */
+static int swapp_http_get(const char *url_utf8, const char *accept, swapp_http_sink sink,
+                          void *sink_ctx, swapp_update_progress_fn progress, void *progress_ctx) {
+    WCHAR url[2048];
+    WCHAR headers[256] = L"";
+    if (MultiByteToWideChar(CP_UTF8, 0, url_utf8, -1, url, ARRAYSIZE(url)) == 0) {
+        return 0;
+    }
+    if (accept) {
+        _snwprintf_s(headers, ARRAYSIZE(headers), _TRUNCATE, L"Accept: %hs", accept);
+    }
     WCHAR host[256];
     WCHAR path[2048];
     URL_COMPONENTS parts = {sizeof(parts)};
@@ -32,8 +42,8 @@ static int swapp_http_get(const WCHAR *url, swapp_http_sink sink, void *sink_ctx
                              WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
         : NULL;
     if (!request
-        || !WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA,
-                               0, 0, 0)
+        || !WinHttpSendRequest(request, accept ? headers : WINHTTP_NO_ADDITIONAL_HEADERS,
+                               accept ? (DWORD)-1L : 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
         || !WinHttpReceiveResponse(request, NULL)) {
         goto done;
     }
@@ -92,7 +102,7 @@ typedef struct {
 static int swapp_sink_memory(const void *data, DWORD size, void *ctx) {
     swapp_mem_sink *mem = ctx;
     if (mem->used + size >= mem->size) {
-        return 0; /* version.txt is a few bytes; anything bigger is wrong */
+        return 0; /* bigger than the caller allowed for */
     }
     memcpy(mem->buf + mem->used, data, size);
     mem->used += size;
@@ -104,19 +114,13 @@ static int swapp_sink_file(const void *data, DWORD size, void *ctx) {
     return fwrite(data, 1, size, (FILE *)ctx) == size;
 }
 
-int swapp_update_fetch_latest(char *hash, size_t hash_size) {
-    char body[64] = {0};
-    swapp_mem_sink mem = {body, sizeof(body), 0};
-    if (!swapp_http_get(L"" SWAPP_RELEASE_URL "version.txt", swapp_sink_memory, &mem, NULL, NULL)) {
+int swapp_http_get_text(const char *url, const char *accept, char *buf, size_t buf_size) {
+    if (buf_size == 0) {
         return 0;
     }
-    size_t length = strspn(body, "0123456789abcdef");
-    if (length == 0 || length >= hash_size) {
-        return 0;
-    }
-    memcpy(hash, body, length);
-    hash[length] = '\0';
-    return 1;
+    buf[0] = '\0';
+    swapp_mem_sink mem = {buf, buf_size, 0};
+    return swapp_http_get(url, accept, swapp_sink_memory, &mem, NULL, NULL);
 }
 
 int swapp_update_download(char *path, size_t path_size, swapp_update_progress_fn progress,
@@ -133,7 +137,10 @@ int swapp_update_download(char *path, size_t path_size, swapp_update_progress_fn
     if (_wfopen_s(&out, file, L"wb") != 0) {
         return 0;
     }
-    int ok = swapp_http_get(L"" SWAPP_RELEASE_URL "swapp.exe", swapp_sink_file, out, progress, ctx);
+    char url[256];
+    _snprintf_s(url, sizeof(url), _TRUNCATE, SWAPP_REPO_URL "/releases/download/%s/swapp.exe",
+                swapp_update_tag());
+    int ok = swapp_http_get(url, NULL, swapp_sink_file, out, progress, ctx);
     ok = fclose(out) == 0 && ok;
     if (!ok) {
         DeleteFileW(file);

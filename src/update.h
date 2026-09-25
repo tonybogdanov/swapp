@@ -11,10 +11,10 @@
 
 #define SWAPP_REPO_URL "https://github.com/tonybogdanov/swapp"
 
-/* The single release always sits at "latest", so fixed download URLs work.
- * version.txt is published beside the binaries and holds the hash of the
- * commit they were built from -- one plain download, no API or JSON. */
-#define SWAPP_RELEASE_URL SWAPP_REPO_URL "/releases/latest/download/"
+#define SWAPP_API_URL "https://api.github.com/repos/tonybogdanov/swapp"
+
+/* The latest release's tag comes from the API; version.txt, published beside
+ * the binaries, holds the hash of the commit they were built from. */
 
 /* Passed to a downloaded binary so the installed copy it hands over to
  * knows to delete it (see install.h). */
@@ -30,7 +30,8 @@ int swapp_update_fetch_latest(char *hash, size_t hash_size);
 typedef void (*swapp_update_progress_fn)(unsigned long long done, unsigned long long total,
                                          void *ctx);
 
-/* Downloads this OS's release binary to a temporary file, whose path is
+/* Downloads this OS's binary, from the release the last successful
+ * swapp_update_fetch_latest found, to a temporary file whose path is
  * written to `path` (UTF-8). Nonzero on success. */
 int swapp_update_download(char *path, size_t path_size, swapp_update_progress_fn progress,
                           void *ctx);
