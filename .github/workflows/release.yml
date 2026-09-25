@@ -1,5 +1,5 @@
-# Builds swapp for Windows (server) and Linux (client) and publishes both
-# single-file binaries as the one release, "swapp", after deleting every
+# Builds swapp for Windows (server) and Linux (client), publishes both
+# single-file binaries as the one release, titled "swapp", then deletes every
 # older release, tag, workflow run and artifact.
 name: release
 
@@ -73,30 +73,23 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      TAG: swapp
+      # A fresh tag per build, never reused. With one fixed tag, recreated
+      # each time, GitHub kept serving the deleted release's files from
+      # /releases/download/<tag>/ for a while after publishing, so the app's
+      # update check saw the old version. The release title stays "swapp".
+      TAG: build-${{ github.run_number }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      # Every release goes first, so the tag is free for the new one.
-      - name: Delete old releases and their tags
-        run: |
-          gh release list --limit 1000 --json tagName --jq '.[].tagName' |
-            while read -r tag; do
-              echo "Deleting release $tag"
-              gh release delete "$tag" --cleanup-tag --yes
-            done
-          # Also a tag left behind without its release.
-          gh api "repos/$GH_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 &&
-            gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG" || true
-
       # The installed app's update check reads this: the hash the binaries
       # were built from, as CMake baked it in.
       - name: Write version file
         run: echo "${GITHUB_SHA::7}" > dist/version.txt
 
+      # Published before the old ones go, so "latest" never points nowhere.
       - name: Publish release
         run: |
           gh release create "$TAG" dist/swapp.exe dist/swapp dist/version.txt \
@@ -104,6 +97,15 @@ jobs:
             --title "swapp" \
             --notes "Built from ${GITHUB_SHA::7}." \
             --latest
+
+      - name: Delete old releases and their tags
+        run: |
+          gh release list --limit 1000 --json tagName --jq '.[].tagName' |
+            while read -r tag; do
+              [ "$tag" = "$TAG" ] && continue
+              echo "Deleting release $tag"
+              gh release delete "$tag" --cleanup-tag --yes
+            done
 
       # Everything is in the release now; this run's own artifacts included.
       - name: Delete all artifacts
