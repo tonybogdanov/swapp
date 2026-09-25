@@ -6,7 +6,6 @@
 #endif
 
 #include "tray.h"
-#include "mode.h"
 #include "monitors.h"
 #include "net.h"
 #include "assets.h"
@@ -43,7 +42,6 @@
 #define SWAPP_ID_WINDOWS_ALL  1003
 #define SWAPP_ID_LINUX_ALL    1004
 #define SWAPP_ID_UPDATE       1005
-#define SWAPP_ID_ABOUT        1006
 #define SWAPP_ID_AUTOSTART    1007
 /* From the update worker threads to the tray window. */
 #define SWAPP_UPDATE_CHECKED_MSG    (WM_APP + 11) /* wp: swapp_update_result */
@@ -1663,7 +1661,7 @@ static void swapp_main_next_screen(void) {
     SetWindowPos(g_main_hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
 }
 
-/* ---- Check for updates / About ---- */
+/* ---- Check for updates ---- */
 
 typedef enum {
     SWAPP_UPDATE_FAILED = 0,
@@ -1868,14 +1866,6 @@ static LRESULT CALLBACK swapp_update_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LP
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
-static void swapp_show_about(void) {
-    MessageBoxA(NULL,
-                "Swapp (" SWAPP_MODE_NAME ")\n\n"
-                "Build " SWAPP_COMMIT "\n\n"
-                SWAPP_REPO_URL,
-                "About swapp", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
-}
-
 static void swapp_tray_show_menu(HWND hwnd) {
     HMENU menu = CreatePopupMenu();
     AppendMenuA(menu, MF_STRING, SWAPP_ID_OPEN, "Open");
@@ -1890,7 +1880,6 @@ static void swapp_tray_show_menu(HWND hwnd) {
                 "Autostart");
     AppendMenuA(menu, MF_STRING | (g_update_busy ? MF_GRAYED : 0), SWAPP_ID_UPDATE,
                 "Check for updates");
-    AppendMenuA(menu, MF_STRING, SWAPP_ID_ABOUT, "About swapp");
     AppendMenuA(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(menu, MF_STRING, SWAPP_ID_QUIT, "Quit");
 
@@ -2007,9 +1996,6 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             }
             if (LOWORD(wp) == SWAPP_ID_UPDATE) {
                 swapp_update_start_check(hwnd);
-            }
-            if (LOWORD(wp) == SWAPP_ID_ABOUT) {
-                swapp_show_about();
             }
             if (LOWORD(wp) == SWAPP_ID_AUTOSTART) {
                 /* The menu reads the entry fresh each time it opens, so

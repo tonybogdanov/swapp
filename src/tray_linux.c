@@ -1,5 +1,4 @@
 #include "tray.h"
-#include "mode.h"
 #include "monitors.h"
 #include "net.h"
 #include "assets.h"
@@ -1507,7 +1506,7 @@ static void swapp_tray_on_quit(GtkMenuItem *item, gpointer user_data) {
     gtk_main_quit();
 }
 
-/* ---- Check for updates / About ---- */
+/* ---- Check for updates ---- */
 
 /* Only one check or download at a time; touched on the main thread only. */
 static gboolean g_update_busy = FALSE;
@@ -1701,17 +1700,6 @@ static void swapp_tray_on_autostart(GtkCheckMenuItem *item, gpointer user_data) 
     swapp_tray_notify("Couldn't change autostart.");
 }
 
-static void swapp_tray_on_about(GtkMenuItem *item, gpointer user_data) {
-    (void)item;
-    (void)user_data;
-    gtk_show_about_dialog(NULL,
-                          "program-name", "Swapp (" SWAPP_MODE_NAME ")",
-                          "version", "Build " SWAPP_COMMIT,
-                          "website", SWAPP_REPO_URL,
-                          "title", "About swapp",
-                          NULL);
-}
-
 /* One instance per user. The lock is a listening socket in the abstract
  * namespace, which the kernel drops the moment the process dies, so a crash
  * can't leave it stale the way a lock file would. The namespace is shared by
@@ -1859,9 +1847,6 @@ void swapp_tray_run(const char *tooltip) {
     g_update_item = gtk_menu_item_new_with_label("Check for updates");
     g_signal_connect(g_update_item, "activate", G_CALLBACK(swapp_tray_on_check_updates), NULL);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), g_update_item);
-    GtkWidget *about_item = gtk_menu_item_new_with_label("About swapp");
-    g_signal_connect(about_item, "activate", G_CALLBACK(swapp_tray_on_about), NULL);
-    gtk_menu_shell_append(GTK_MENU_SHELL(menu), about_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
 
     GtkWidget *quit_item = gtk_menu_item_new_with_label("Quit");

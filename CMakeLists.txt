@@ -21,10 +21,10 @@ add_executable(swapp src/main.c src/monitors_common.c src/assets.c src/update_co
                "${SWAPP_ASSETS_C}")
 target_include_directories(swapp PRIVATE src)
 
-# The short commit hash is the version (no semver): About shows it, and the
-# update check compares it with the release's version.txt. Resolved at
-# configure time; .git/logs/HEAD moves on every commit and checkout, so
-# depending on it re-runs the configure when the hash changes.
+# The short commit hash is the version (no semver): the update check compares
+# it with the release's version.txt. Resolved at configure time;
+# .git/logs/HEAD moves on every commit and checkout, so depending on it
+# re-runs the configure when the hash changes.
 find_package(Git QUIET)
 if(GIT_FOUND)
     execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD
