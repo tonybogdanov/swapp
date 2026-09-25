@@ -48,6 +48,8 @@
 #define SWAPP_UPDATE_PROGRESS_MSG   (WM_APP + 12) /* wp: permille */
 #define SWAPP_UPDATE_DOWNLOADED_MSG (WM_APP + 13) /* wp: nonzero on success */
 #define SWAPP_UPDATE_CLASS    "SwappUpdateWindow"
+/* The taskbar theme changed: reload the app icon variant. */
+#define SWAPP_THEME_MSG       (WM_APP + 14)
 
 /* The main window. The monitor rows move in here once the client can drive
  * them; for now it shows the link status, which is the only thing the
@@ -80,6 +82,92 @@ DEFINE_GUID(SWAPP_GUID_DEVINTERFACE_MONITOR, 0xe6f07b5f, 0xee97, 0x4a90,
  * swapp_tray_run registered -- only one tray icon ever exists per process. */
 static NOTIFYICONDATAA g_nid = {0};
 static HDEVNOTIFY g_dev_notify = NULL;
+
+/* The app icon comes in two variants (art/app_icon.py): a dark bezel for
+ * light backgrounds and a white one for dark. The tray and the taskbar are
+ * the backgrounds it sits on, so the taskbar's theme picks the variant. */
+#define SWAPP_THEME_KEY "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
+static HICON g_app_icon_small = NULL;
+static HICON g_app_icon_big = NULL;
+
+static int swapp_taskbar_is_dark(void) {
+    DWORD light = 0;
+    DWORD size = sizeof(light);
+    if (RegGetValueA(HKEY_CURRENT_USER, SWAPP_THEME_KEY, "SystemUsesLightTheme", RRF_RT_REG_DWORD,
+                     NULL, &light, &size) != ERROR_SUCCESS) {
+        return 1; /* Windows 11's default taskbar */
+    }
+    return light == 0;
+}
+
+static DWORD swapp_le32(const BYTE *p) {
+    return (DWORD)p[0] | (DWORD)p[1] << 8 | (DWORD)p[2] << 16 | (DWORD)p[3] << 24;
+}
+
+/* Picks the embedded .ico's image closest to `size` (the smallest at least
+ * that big, else the largest) rather than letting Windows scale one. */
+static HICON swapp_app_icon(int size) {
+    const swapp_asset *asset =
+        swapp_asset_find(swapp_taskbar_is_dark() ? "icons/app-dark.ico" : "icons/app-light.ico");
+    if (!asset || asset->size < 6) {
+        return NULL;
+    }
+    const BYTE *ico = asset->data;
+    int count = ico[4] | ico[5] << 8;
+    int best = -1;
+    int best_width = 0;
+    for (int i = 0; i < count && 6 + (size_t)(i + 1) * 16 <= asset->size; i++) {
+        int width = ico[6 + i * 16] ? ico[6 + i * 16] : 256;
+        int better = best < 0
+                     || (width >= size && (best_width < size || width < best_width))
+                     || (best_width < size && width > best_width);
+        if (better) {
+            best = i;
+            best_width = width;
+        }
+    }
+    if (best < 0) {
+        return NULL;
+    }
+    const BYTE *entry = ico + 6 + best * 16;
+    DWORD bytes = swapp_le32(entry + 8);
+    DWORD offset = swapp_le32(entry + 12);
+    if ((size_t)offset + bytes > asset->size) {
+        return NULL;
+    }
+    return CreateIconFromResourceEx((PBYTE)ico + offset, bytes, TRUE, 0x00030000, size, size,
+                                    LR_DEFAULTCOLOR);
+}
+
+static void swapp_window_set_icons(HWND hwnd) {
+    if (hwnd) {
+        SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_app_icon_small);
+        SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_app_icon_big);
+    }
+}
+
+static void swapp_app_icons_load(void) {
+    g_app_icon_small = swapp_app_icon(GetSystemMetrics(SM_CXSMICON));
+    g_app_icon_big = swapp_app_icon(GetSystemMetrics(SM_CXICON));
+}
+
+/* A message-only window gets no WM_SETTINGCHANGE broadcast, so the theme
+ * key is watched directly and a change posted to the tray window. */
+static DWORD WINAPI swapp_theme_watch_thread(LPVOID param) {
+    HKEY key;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, SWAPP_THEME_KEY, 0, KEY_NOTIFY, &key) != ERROR_SUCCESS) {
+        return 0;
+    }
+    HANDLE changed = CreateEventA(NULL, FALSE, FALSE, NULL);
+    while (changed
+           && RegNotifyChangeKeyValue(key, FALSE, REG_NOTIFY_CHANGE_LAST_SET, changed, TRUE)
+                  == ERROR_SUCCESS
+           && WaitForSingleObject(changed, INFINITE) == WAIT_OBJECT_0) {
+        PostMessageA((HWND)param, SWAPP_THEME_MSG, 0, 0);
+    }
+    RegCloseKey(key);
+    return 0;
+}
 
 /* The monitor list window -- a normal top-level window, separate from the
  * message-only one that owns the tray icon. One row per cached monitor: a
@@ -1397,6 +1485,7 @@ static void swapp_show_main_window(void) {
         if (!g_main_hwnd) {
             return;
         }
+        swapp_window_set_icons(g_main_hwnd);
 
         /* The window's own DPI, not the primary monitor's: on a mixed-DPI
          * desktop the two differ, and every metric below is derived from
@@ -1656,6 +1745,7 @@ static void swapp_update_show_progress(void) {
     if (!g_update_hwnd) {
         return;
     }
+    swapp_window_set_icons(g_update_hwnd);
 
     INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_PROGRESS_CLASS};
     InitCommonControlsEx(&icc);
@@ -1760,6 +1850,24 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         case SWAPP_SHOW_MSG:
             swapp_show_main_window();
             return 0;
+        case SWAPP_THEME_MSG: {
+            HICON old_small = g_app_icon_small;
+            HICON old_big = g_app_icon_big;
+            swapp_app_icons_load();
+            if (g_app_icon_small) {
+                g_nid.hIcon = g_app_icon_small;
+                Shell_NotifyIconA(NIM_MODIFY, &g_nid);
+            }
+            swapp_window_set_icons(g_main_hwnd);
+            swapp_window_set_icons(g_update_hwnd);
+            if (old_small) {
+                DestroyIcon(old_small);
+            }
+            if (old_big) {
+                DestroyIcon(old_big);
+            }
+            return 0;
+        }
         case SWAPP_UPDATE_CHECKED_MSG:
             swapp_update_on_checked(hwnd, (swapp_update_result)wp);
             return 0;
@@ -2003,10 +2111,16 @@ void swapp_tray_run(const char *tooltip) {
     g_nid.uID = SWAPP_TRAY_UID;
     g_nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     g_nid.uCallbackMessage = SWAPP_TRAY_MSG;
-    g_nid.hIcon = LoadIconA(NULL, IDI_APPLICATION);
+    swapp_app_icons_load();
+    g_nid.hIcon = g_app_icon_small ? g_app_icon_small : LoadIconA(NULL, IDI_APPLICATION);
     strncpy(g_nid.szTip, tooltip, sizeof(g_nid.szTip) - 1);
 
     Shell_NotifyIconA(NIM_ADD, &g_nid);
+
+    HANDLE theme_watch = CreateThread(NULL, 0, swapp_theme_watch_thread, hwnd, 0, NULL);
+    if (theme_watch) {
+        CloseHandle(theme_watch);
+    }
 
     /* Start listening, then let the tooltip track whatever the link is
      * doing. */

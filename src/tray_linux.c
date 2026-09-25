@@ -466,18 +466,17 @@ static guint g_spinner_source = 0;
  * app's font. Deliberately not installed system-wide: the app should look
  * the same on a machine where the user has never heard of Inter, without
  * touching anything outside its own cache directory. */
-static int swapp_font_add(const char *name) {
+/* Some consumers only take files (fontconfig, the AppIndicator icon), so an
+ * embedded asset is written to ~/.cache/swapp/<subdir>/<filename> once and
+ * reused, rewritten only when the bundled one changed. Returns the path
+ * (g_free it), or NULL. */
+static char *swapp_asset_to_cache(const char *name, const char *subdir, const char *filename) {
     const swapp_asset *asset = swapp_asset_find(name);
     if (!asset) {
-        return 0;
+        return NULL;
     }
-
-    /* Fontconfig only registers fonts from files, so the embedded face is
-     * written out once and reused; rewritten only if the bundled one changed. */
-    char *base = g_path_get_basename(name);
-    char *dir = g_build_filename(g_get_user_cache_dir(), "swapp", "fonts", NULL);
-    char *path = g_build_filename(dir, base, NULL);
-    int ok = 0;
+    char *dir = g_build_filename(g_get_user_cache_dir(), "swapp", subdir, NULL);
+    char *path = g_build_filename(dir, filename, NULL);
 
     gchar *existing = NULL;
     gsize existing_size = 0;
@@ -486,14 +485,20 @@ static int swapp_font_add(const char *name) {
                   && memcmp(existing, asset->data, asset->size) == 0;
     g_free(existing);
 
-    if (current || (g_mkdir_with_parents(dir, 0700) == 0
-                    && g_file_set_contents(path, (const gchar *)asset->data,
-                                           (gssize)asset->size, NULL))) {
-        ok = FcConfigAppFontAddFile(NULL, (const FcChar8 *)path);
+    if (!current && (g_mkdir_with_parents(dir, 0700) != 0
+                     || !g_file_set_contents(path, (const gchar *)asset->data,
+                                             (gssize)asset->size, NULL))) {
+        g_clear_pointer(&path, g_free);
     }
-
-    g_free(path);
     g_free(dir);
+    return path;
+}
+
+static int swapp_font_add(const char *name) {
+    char *base = g_path_get_basename(name);
+    char *path = swapp_asset_to_cache(name, "fonts", base);
+    int ok = path && FcConfigAppFontAddFile(NULL, (const FcChar8 *)path);
+    g_free(path);
     g_free(base);
     return ok;
 }
@@ -1803,8 +1808,25 @@ void swapp_tray_run(const char *tooltip) {
                       swapp_tray_log_handler, NULL);
 #endif
 
-    AppIndicator *indicator = app_indicator_new(
-        "swapp", "application-x-executable", APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
+    /* The white-bezel variant: GNOME's and Ubuntu's top bars are dark
+     * whatever the theme. AppIndicator only takes icons from files, found by
+     * name in a theme path, so the embedded one is written out first. */
+    char *tray_icon = swapp_asset_to_cache("icons/app-dark.png", "icons", "swapp-tray.png");
+    char *tray_icon_dir = tray_icon ? g_path_get_dirname(tray_icon) : NULL;
+    AppIndicator *indicator = tray_icon_dir
+        ? app_indicator_new_with_path("swapp", "swapp-tray", APP_INDICATOR_CATEGORY_APPLICATION_STATUS,
+                                      tray_icon_dir)
+        : app_indicator_new("swapp", "application-x-executable",
+                            APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
+    g_free(tray_icon_dir);
+    g_free(tray_icon);
+
+    /* Window icons (dock, Alt-Tab): same variant, those are dark too. */
+    GdkPixbuf *window_icon = swapp_pixbuf_from_asset("icons/app-dark.png", 256, 256);
+    if (window_icon) {
+        gtk_window_set_default_icon(window_icon);
+        g_object_unref(window_icon);
+    }
     app_indicator_set_status(indicator, APP_INDICATOR_STATUS_ACTIVE);
     app_indicator_set_title(indicator, tooltip);
     app_indicator_set_menu(indicator, GTK_MENU(menu));

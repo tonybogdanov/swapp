@@ -1,0 +1,4 @@
+// The executable's own icon, shown by Explorer. It can't follow the theme
+// like the tray icon does, so it is the dark-bezel variant, which reads on
+// Explorer's default light background.
+1 ICON "../assets/icons/app-light.ico"

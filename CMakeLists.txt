@@ -43,7 +43,7 @@ if(WIN32)
     # The manifest opts into comctl32 v6, without which the monitor table
     # renders in the pre-XP classic style.
     target_sources(swapp PRIVATE src/tray_win.c src/monitors_win.c src/net_win.c src/install_win.c
-                   src/update_win.c src/swapp.manifest)
+                   src/update_win.c src/swapp.manifest src/swapp.rc)
     target_link_libraries(swapp PRIVATE shell32 shlwapi winhttp user32 advapi32 dxva2 ws2_32 comctl32 uxtheme)
 
     # GUI subsystem so no console window is created when the app launches,
