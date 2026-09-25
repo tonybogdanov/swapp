@@ -22,21 +22,21 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      # NMake ships with MSVC, so no extra generator has to be installed.
+      # The MSVC environment comes straight from vcvars64.bat rather than a
+      # setup action: the usual one (ilammy/msvc-dev-cmd) still targets the
+      # deprecated Node 20 runtime. NMake ships with MSVC, so no extra
+      # generator has to be installed.
       - name: Build
+        shell: cmd
         run: |
-          cmake -S . -B build-windows -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
-          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed." }
-          cmake --build build-windows
-          if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake -S . -B build-windows -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release || exit /b 1
+          cmake --build build-windows || exit /b 1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: swapp-windows
           path: build-windows/swapp.exe
@@ -47,7 +47,7 @@ jobs:
     # and still runs on whatever the client laptop has.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -61,7 +61,7 @@ jobs:
           cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build-linux
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: swapp-linux
           path: build-linux/swapp
@@ -69,7 +69,9 @@ jobs:
 
   release:
     needs: [build-windows, build-linux]
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest, which moves to Ubuntu 26 from
+    # 2026-10-19; this job only runs gh, so any current image will do.
+    runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -79,7 +81,7 @@ jobs:
       # update check saw the old version. The release title stays "swapp".
       TAG: build-${{ github.run_number }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
