@@ -34,6 +34,8 @@
 #define SWAPP_NET_SWITCH_MSG  (WM_APP + 7)
 #define SWAPP_NET_ASSIGN_MSG  (WM_APP + 8)
 #define SWAPP_NET_SWITCH_ALL_MSG (WM_APP + 9)
+/* Posted by a second launch to the running instance: show the window. */
+#define SWAPP_SHOW_MSG        (WM_APP + 10)
 #define SWAPP_ID_OPEN         1002
 #define SWAPP_ID_WINDOWS_ALL  1003
 #define SWAPP_ID_LINUX_ALL    1004
@@ -1586,6 +1588,9 @@ static void swapp_tray_show_menu(HWND hwnd) {
 
 static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case SWAPP_SHOW_MSG:
+            swapp_show_main_window();
+            return 0;
         case SWAPP_TRAY_MSG:
             if (lp == WM_RBUTTONUP) {
                 swapp_tray_show_menu(hwnd);
@@ -1694,7 +1699,41 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     }
 }
 
+int swapp_tray_stop_running(void) {
+    HWND running = FindWindowExA(HWND_MESSAGE, NULL, "SwappTrayWindow", NULL);
+    if (!running) {
+        return 0;
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(running, &pid);
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    PostMessageA(running, WM_COMMAND, SWAPP_ID_QUIT, 0);
+    if (process) {
+        WaitForSingleObject(process, 5000);
+        CloseHandle(process);
+    }
+    return 1;
+}
+
 void swapp_tray_run(const char *tooltip) {
+    /* One instance per session. A second launch hands over to the running
+     * one -- shows its window -- and exits, rather than putting up a second
+     * tray icon driving the same monitors. The mutex is freed by the OS
+     * when the owning process dies, so a crash can't leave it stale. */
+    CreateMutexA(NULL, FALSE, "Local\\swapp");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND running = FindWindowExA(HWND_MESSAGE, NULL, "SwappTrayWindow", NULL);
+        if (running) {
+            /* Only the foreground process may pass on the right to take
+             * the foreground, and right now that is this one. */
+            DWORD pid = 0;
+            GetWindowThreadProcessId(running, &pid);
+            AllowSetForegroundWindow(pid);
+            PostMessageA(running, SWAPP_SHOW_MSG, 0, 0);
+        }
+        return;
+    }
+
     /* Per-monitor DPI awareness, set in code rather than through a manifest
      * so the plain executable this project builds gets it too. Without it
      * Windows bitmap-stretches the window on the 200% monitors this runs

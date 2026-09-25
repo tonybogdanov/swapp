@@ -10,7 +10,9 @@ release, `swapp`, with the two binaries; older releases, runs and artifacts are
 deleted so only the latest build exists.
 
 Assets are compiled into the binary (`cmake/embed_assets.cmake`), so each
-release file is the whole app.
+release file is the whole app. Running it installs it, per-user because
+neither machine gives the app elevation; running a different build later
+replaces the installed one, which is how updates happen (`src/install.h`).
 
 ## Modes
 

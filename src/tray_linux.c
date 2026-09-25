@@ -20,11 +20,18 @@
 /* For loading the bundled Inter face into this process only. */
 #include <fontconfig/fontconfig.h>
 
+#include <errno.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 #include <gio/gio.h>
+#include <glib-unix.h>
 
 #include <X11/Xlib.h>
 #include <X11/XKBlib.h>
@@ -1492,9 +1499,108 @@ static void swapp_tray_on_quit(GtkMenuItem *item, gpointer user_data) {
     gtk_main_quit();
 }
 
+/* One instance per user. The lock is a listening socket in the abstract
+ * namespace, which the kernel drops the moment the process dies, so a crash
+ * can't leave it stale the way a lock file would. The namespace is shared by
+ * every user, hence the uid in the name. A later launch connects and sends
+ * one byte: 's' to have the window shown, 'q' to have the app quit. */
+static socklen_t swapp_instance_address(struct sockaddr_un *addr) {
+    memset(addr, 0, sizeof(*addr));
+    addr->sun_family = AF_UNIX;
+    /* sun_path[0] stays '\0': that is what makes the name abstract. */
+    int length = snprintf(addr->sun_path + 1, sizeof(addr->sun_path) - 1, "swapp-%u",
+                          (unsigned)getuid());
+    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + length);
+}
+
+/* Connects to the running instance and sends it `command`. Returns zero if
+ * none is running. */
+static int swapp_instance_send(char command) {
+    struct sockaddr_un addr;
+    socklen_t size = swapp_instance_address(&addr);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    int sent = connect(fd, (struct sockaddr *)&addr, size) == 0 && write(fd, &command, 1) == 1;
+    close(fd);
+    return sent;
+}
+
+static void swapp_tray_on_quit(GtkMenuItem *item, gpointer user_data);
+
+static gboolean swapp_instance_on_connect(gint fd, GIOCondition condition, gpointer user_data) {
+    (void)condition;
+    (void)user_data;
+    int peer = accept(fd, NULL, NULL);
+    if (peer < 0) {
+        return G_SOURCE_CONTINUE;
+    }
+    /* The sender writes right after connecting; the timeout only keeps a
+     * peer that never does from stalling the main loop. */
+    struct timeval timeout = {1, 0};
+    setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    char command = 0;
+    if (read(peer, &command, 1) != 1) {
+        command = 0; /* a bare liveness probe from swapp_tray_stop_running */
+    }
+    close(peer);
+
+    if (command == 'q') {
+        swapp_tray_on_quit(NULL, NULL);
+    } else if (command == 's') {
+        swapp_show_main_window();
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+/* Returns zero when another instance is already running -- it has been
+ * asked to show its window -- and this one should exit. */
+static int swapp_instance_claim(void) {
+    struct sockaddr_un addr;
+    socklen_t size = swapp_instance_address(&addr);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        return 1; /* can't tell; better two instances than none */
+    }
+    if (bind(fd, (struct sockaddr *)&addr, size) == 0 && listen(fd, 4) == 0) {
+        g_unix_fd_add(fd, G_IO_IN, swapp_instance_on_connect, NULL);
+        return 1;
+    }
+    int in_use = errno == EADDRINUSE;
+    close(fd);
+    return !(in_use && swapp_instance_send('s'));
+}
+
+int swapp_tray_stop_running(void) {
+    if (!swapp_instance_send('q')) {
+        return 0;
+    }
+    /* Gone once nothing accepts on the name any more. */
+    for (int i = 0; i < 50; i++) {
+        g_usleep(100 * 1000);
+        struct sockaddr_un addr;
+        socklen_t size = swapp_instance_address(&addr);
+        int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) {
+            break;
+        }
+        int alive = connect(fd, (struct sockaddr *)&addr, size) == 0;
+        close(fd);
+        if (!alive) {
+            break;
+        }
+    }
+    return 1;
+}
+
 void swapp_tray_run(const char *tooltip) {
     int argc = 0;
     gtk_init(&argc, NULL);
+
+    if (!swapp_instance_claim()) {
+        return;
+    }
 
     swapp_icons_load();
     swapp_font_load();
