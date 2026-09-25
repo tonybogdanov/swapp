@@ -1,0 +1,23 @@
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# CMake build trees (one per OS, see z_run.*).
+/build-windows/
+/build-linux/
+
+# Stray compiler output from building outside the build trees.
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+
+# Per-machine Claude Code settings.
+/.claude/settings.local.json
+
+# Editors and OS clutter.
+/.idea/
+/.vscode/
+*.swp
+.DS_Store
+Thumbs.db
