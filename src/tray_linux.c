@@ -1514,6 +1514,8 @@ static GtkWidget *g_update_item = NULL;
 static GtkWidget *g_update_window = NULL;
 static GtkWidget *g_update_label = NULL;
 static GtkWidget *g_update_bar = NULL;
+static GtkWidget *g_update_buttons = NULL;
+static GtkWidget *g_update_button = NULL;
 /* Written by the worker before it hands back to the main thread. */
 static char g_update_latest[16];
 static char g_update_path[PATH_MAX];
@@ -1533,6 +1535,7 @@ static void swapp_update_close_progress(void) {
     if (g_update_window) {
         gtk_widget_destroy(g_update_window);
         g_update_window = g_update_label = g_update_bar = NULL;
+        g_update_buttons = g_update_button = NULL;
     }
 }
 
@@ -1562,15 +1565,39 @@ static void swapp_update_on_progress(unsigned long long done, unsigned long long
 }
 
 static gboolean swapp_update_on_downloaded(gpointer data) {
-    /* On success the new binary installs itself, which starts by asking
-     * this instance to quit -- so the window just waits to be torn down. */
-    if (GPOINTER_TO_INT(data) && swapp_update_launch(g_update_path)) {
-        gtk_label_set_text(GTK_LABEL(g_update_label), "Installing...");
-        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(g_update_bar), 1.0);
+    if (!GPOINTER_TO_INT(data)) {
+        swapp_update_fail("Couldn't download the update.");
         return G_SOURCE_REMOVE;
     }
-    swapp_update_fail("Couldn't download the update.");
+    char *text = g_strdup_printf("Build %s downloaded.", g_update_latest);
+    gtk_label_set_text(GTK_LABEL(g_update_label), text);
+    g_free(text);
+    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(g_update_bar), 1.0);
+    gtk_widget_show(g_update_buttons);
+    gtk_widget_grab_focus(g_update_button);
     return G_SOURCE_REMOVE;
+}
+
+/* The new binary installs itself, which starts by asking this instance to
+ * quit -- so after launching it the window just waits to be torn down. */
+static void swapp_update_on_install(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    gtk_widget_set_sensitive(g_update_buttons, FALSE);
+    if (swapp_update_launch(g_update_path)) {
+        gtk_label_set_text(GTK_LABEL(g_update_label), "Installing...");
+        return;
+    }
+    swapp_update_discard(g_update_path);
+    swapp_update_fail("Couldn't start the update.");
+}
+
+static void swapp_update_on_cancel(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    swapp_update_discard(g_update_path);
+    swapp_update_close_progress();
+    swapp_update_set_busy(FALSE);
 }
 
 static gpointer swapp_update_download_thread(gpointer data) {
@@ -1581,8 +1608,10 @@ static gpointer swapp_update_download_thread(gpointer data) {
     return NULL;
 }
 
-/* A small fixed window: a label and a progress bar. Closing it is refused --
- * the download can't be cancelled, and once done the app is replaced. */
+/* A small fixed window: a label, a progress bar, and -- once the download is
+ * in -- Update and Cancel. Nothing is installed until Update is clicked.
+ * Closing it is refused: the download can't be interrupted, and afterwards
+ * Cancel is the way out. */
 static void swapp_update_show_progress(void) {
     g_update_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(g_update_window), "Swapp - Updating");
@@ -1601,9 +1630,24 @@ static void swapp_update_show_progress(void) {
     gtk_widget_set_size_request(g_update_bar, 340, -1);
     gtk_box_pack_start(GTK_BOX(box), g_update_label, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), g_update_bar, FALSE, FALSE, 0);
+
+    /* Built now, shown once the download has finished. */
+    g_update_buttons = gtk_button_box_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_button_box_set_layout(GTK_BUTTON_BOX(g_update_buttons), GTK_BUTTONBOX_END);
+    gtk_box_set_spacing(GTK_BOX(g_update_buttons), 8);
+    GtkWidget *cancel = gtk_button_new_with_label("Cancel");
+    g_signal_connect(cancel, "clicked", G_CALLBACK(swapp_update_on_cancel), NULL);
+    g_update_button = gtk_button_new_with_label("Update");
+    gtk_style_context_add_class(gtk_widget_get_style_context(g_update_button),
+                                GTK_STYLE_CLASS_SUGGESTED_ACTION);
+    g_signal_connect(g_update_button, "clicked", G_CALLBACK(swapp_update_on_install), NULL);
+    gtk_container_add(GTK_CONTAINER(g_update_buttons), cancel);
+    gtk_container_add(GTK_CONTAINER(g_update_buttons), g_update_button);
+    gtk_box_pack_start(GTK_BOX(box), g_update_buttons, FALSE, FALSE, 0);
     gtk_container_add(GTK_CONTAINER(g_update_window), box);
 
     gtk_widget_show_all(g_update_window);
+    gtk_widget_hide(g_update_buttons);
     gtk_window_present(GTK_WINDOW(g_update_window));
 }
 

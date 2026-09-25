@@ -159,3 +159,10 @@ int swapp_update_launch(const char *path) {
     CloseHandle(process.hProcess);
     return 1;
 }
+
+void swapp_update_discard(const char *path) {
+    WCHAR file[MAX_PATH];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, file, ARRAYSIZE(file)) != 0) {
+        DeleteFileW(file);
+    }
+}

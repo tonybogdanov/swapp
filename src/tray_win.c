@@ -1677,6 +1677,8 @@ static char g_update_path[MAX_PATH * 3];
 static HWND g_update_hwnd = NULL;
 static HWND g_update_label = NULL;
 static HWND g_update_bar = NULL;
+static HWND g_update_button = NULL;
+static HWND g_update_cancel = NULL;
 
 static void swapp_tray_notify(const char *text) {
     g_nid.uFlags |= NIF_INFO;
@@ -1728,11 +1730,13 @@ static void swapp_update_start_check(HWND tray) {
     }
 }
 
-/* A small fixed window: a label and a progress bar. It has no close box --
- * the download can't be cancelled, and once done the app is replaced. */
+/* A small fixed window: a label, a progress bar, and -- once the download is
+ * in -- Update and Cancel. Nothing is installed until Update is clicked. It
+ * has no close box: the download can't be interrupted, and afterwards
+ * Cancel is the way out. */
 static void swapp_update_show_progress(void) {
     int width = swapp_dpi_scale(380);
-    int height = swapp_dpi_scale(120);
+    int height = swapp_dpi_scale(150);
     RECT frame = {0, 0, width, height};
     DWORD style = WS_OVERLAPPED | WS_CAPTION;
     AdjustWindowRect(&frame, style, FALSE);
@@ -1764,6 +1768,21 @@ static void swapp_update_show_progress(void) {
                                    GetModuleHandleA(NULL), NULL);
     SendMessageA(g_update_bar, PBM_SETRANGE32, 0, 1000);
 
+    /* Created now, shown once the download has finished. */
+    int button_w = swapp_dpi_scale(96);
+    int button_h = swapp_dpi_scale(30);
+    int button_y = height - margin - button_h;
+    g_update_button = CreateWindowExA(0, "BUTTON", "Update", WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                      width - margin - button_w, button_y, button_w, button_h,
+                                      g_update_hwnd, (HMENU)IDOK, GetModuleHandleA(NULL), NULL);
+    g_update_cancel = CreateWindowExA(0, "BUTTON", "Cancel", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                                      width - margin - 2 * button_w - swapp_dpi_scale(8), button_y,
+                                      button_w, button_h, g_update_hwnd, (HMENU)IDCANCEL,
+                                      GetModuleHandleA(NULL), NULL);
+    HFONT font = g_font ? g_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    SendMessageA(g_update_button, WM_SETFONT, (WPARAM)font, TRUE);
+    SendMessageA(g_update_cancel, WM_SETFONT, (WPARAM)font, TRUE);
+
     ShowWindow(g_update_hwnd, SW_SHOW);
     SetForegroundWindow(g_update_hwnd);
 }
@@ -1772,6 +1791,7 @@ static void swapp_update_close_progress(void) {
     if (g_update_hwnd) {
         DestroyWindow(g_update_hwnd);
         g_update_hwnd = g_update_label = g_update_bar = NULL;
+        g_update_button = g_update_cancel = NULL;
     }
 }
 
@@ -1798,16 +1818,52 @@ static void swapp_update_on_checked(HWND tray, swapp_update_result result) {
 }
 
 static void swapp_update_on_downloaded(int ok) {
-    /* On success the new binary installs itself, which starts by asking
-     * this instance to quit -- so the window just waits to be torn down. */
-    if (ok && swapp_update_launch(g_update_path)) {
-        SetWindowTextA(g_update_label, "Installing...");
-        SendMessageA(g_update_bar, PBM_SETPOS, 1000, 0);
+    if (!ok) {
+        swapp_update_close_progress();
+        g_update_busy = 0;
+        swapp_tray_notify("Couldn't download the update.");
         return;
     }
+    char text[64];
+    _snprintf_s(text, sizeof(text), _TRUNCATE, "Build %s downloaded.", g_update_latest);
+    SetWindowTextA(g_update_label, text);
+    SendMessageA(g_update_bar, PBM_SETPOS, 1000, 0);
+    ShowWindow(g_update_cancel, SW_SHOW);
+    ShowWindow(g_update_button, SW_SHOW);
+    SetFocus(g_update_button);
+}
+
+/* The new binary installs itself, which starts by asking this instance to
+ * quit -- so after launching it the window just waits to be torn down. */
+static void swapp_update_install(void) {
+    EnableWindow(g_update_button, FALSE);
+    EnableWindow(g_update_cancel, FALSE);
+    if (swapp_update_launch(g_update_path)) {
+        SetWindowTextA(g_update_label, "Installing...");
+        return;
+    }
+    swapp_update_discard(g_update_path);
     swapp_update_close_progress();
     g_update_busy = 0;
-    swapp_tray_notify("Couldn't download the update.");
+    swapp_tray_notify("Couldn't start the update.");
+}
+
+static void swapp_update_cancel(void) {
+    swapp_update_discard(g_update_path);
+    swapp_update_close_progress();
+    g_update_busy = 0;
+}
+
+static LRESULT CALLBACK swapp_update_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_COMMAND && HIWORD(wp) == BN_CLICKED) {
+        if (LOWORD(wp) == IDOK) {
+            swapp_update_install();
+        } else if (LOWORD(wp) == IDCANCEL) {
+            swapp_update_cancel();
+        }
+        return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
 static void swapp_show_about(void) {
@@ -2070,7 +2126,7 @@ void swapp_tray_run(const char *tooltip) {
     RegisterClassA(&icon_wc);
 
     WNDCLASSA update_wc = {0};
-    update_wc.lpfnWndProc = DefWindowProcA;
+    update_wc.lpfnWndProc = swapp_update_wnd_proc;
     update_wc.hInstance = wc.hInstance;
     update_wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     update_wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);

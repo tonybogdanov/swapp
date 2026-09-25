@@ -109,3 +109,7 @@ int swapp_update_launch(const char *path) {
     char *argv[] = {(char *)path, SWAPP_ARG_UPDATE, NULL};
     return g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, NULL);
 }
+
+void swapp_update_discard(const char *path) {
+    g_unlink(path);
+}

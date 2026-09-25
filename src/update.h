@@ -35,6 +35,9 @@ typedef void (*swapp_update_progress_fn)(unsigned long long done, unsigned long 
 int swapp_update_download(char *path, size_t path_size, swapp_update_progress_fn progress,
                           void *ctx);
 
+/* Deletes a download that won't be installed. */
+void swapp_update_discard(const char *path);
+
 /* Starts the downloaded binary with SWAPP_ARG_UPDATE. It installs itself
  * over this one, which includes asking this running instance to quit. */
 int swapp_update_launch(const char *path);
