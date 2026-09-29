@@ -311,6 +311,15 @@ static gboolean swapp_hotkey_open_fired(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
+/* F15 runs the post-switch modeset by hand, for a screen that stayed on "no
+ * signal" after a switch here. Local, not through the server: the modeset
+ * is this machine's to do, and it needs no monitor state. */
+static gboolean swapp_hotkey_acquire_fired(gpointer user_data) {
+    (void)user_data;
+    swapp_monitors_acquire_async();
+    return G_SOURCE_REMOVE;
+}
+
 /* Runs on its own X11 connection so it can block in XNextEvent without
  * stalling GTK's main loop. Grabs F16 across every combination of the lock
  * modifiers (NumLock, CapsLock) since XGrabKey requires an exact
@@ -320,13 +329,14 @@ static gboolean swapp_hotkey_open_fired(gpointer user_data) {
  * never fires; there is no portable Wayland equivalent. */
 #define SWAPP_F16_KEYCODE 194  /* evdev KEY_F16 (186) + the X11 offset of 8 */
 #define SWAPP_F14_KEYCODE 192  /* evdev KEY_F14 (184) + the X11 offset of 8 */
+#define SWAPP_F15_KEYCODE 193  /* evdev KEY_F15 (185) + the X11 offset of 8 */
 
 static gpointer swapp_hotkey_thread(gpointer user_data) {
     (void)user_data;
 
     Display *display = XOpenDisplay(NULL);
     if (!display) {
-        g_warning("swapp: no X11 display available; F16/F14 global hotkeys disabled");
+        g_warning("swapp: no X11 display available; F14/F15/F16 global hotkeys disabled");
         return NULL;
     }
 
@@ -342,6 +352,10 @@ static gpointer swapp_hotkey_thread(gpointer user_data) {
     if (open_keycode == 0) {
         open_keycode = SWAPP_F14_KEYCODE;
     }
+    KeyCode acquire_keycode = XKeysymToKeycode(display, XK_F15);
+    if (acquire_keycode == 0) {
+        acquire_keycode = SWAPP_F15_KEYCODE;
+    }
 
     static const unsigned int lock_masks[] = {0, Mod2Mask, LockMask, Mod2Mask | LockMask};
     int n_screens = ScreenCount(display);
@@ -351,6 +365,9 @@ static gpointer swapp_hotkey_thread(gpointer user_data) {
             XGrabKey(display, keycode, lock_masks[i], root, False, GrabModeAsync, GrabModeAsync);
             if (open_keycode != keycode) {
                 XGrabKey(display, open_keycode, lock_masks[i], root, False, GrabModeAsync, GrabModeAsync);
+            }
+            if (acquire_keycode != keycode && acquire_keycode != open_keycode) {
+                XGrabKey(display, acquire_keycode, lock_masks[i], root, False, GrabModeAsync, GrabModeAsync);
             }
         }
     }
@@ -364,6 +381,7 @@ static gpointer swapp_hotkey_thread(gpointer user_data) {
     XkbSetDetectableAutoRepeat(display, True, NULL);
     int down = 0;
     int open_down = 0;
+    int acquire_down = 0;
     for (;;) {
         XEvent event;
         XNextEvent(display, &event); /* blocks until a grabbed key is pressed */
@@ -371,14 +389,20 @@ static gpointer swapp_hotkey_thread(gpointer user_data) {
             continue;
         }
         KeyCode pressed = event.xkey.keycode;
-        int *state = pressed == keycode ? &down : (pressed == open_keycode ? &open_down : NULL);
+        int *state = pressed == keycode           ? &down
+                     : pressed == open_keycode    ? &open_down
+                     : pressed == acquire_keycode ? &acquire_down
+                                                  : NULL;
         if (!state) {
             continue;
         }
         if (event.type == KeyPress) {
             if (!*state) {
                 *state = 1;
-                g_idle_add(pressed == keycode ? swapp_hotkey_fired : swapp_hotkey_open_fired, NULL);
+                g_idle_add(pressed == keycode        ? swapp_hotkey_fired
+                           : pressed == open_keycode ? swapp_hotkey_open_fired
+                                                     : swapp_hotkey_acquire_fired,
+                           NULL);
             }
         } else {
             *state = 0;

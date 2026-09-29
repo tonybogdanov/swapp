@@ -361,16 +361,11 @@ static void swapp_monitors_recover_signal(void) {
     swapp_sleep_ms(SWAPP_SWITCH_SETTLE_MS);
 }
 
-/* Most monitors one switch watches for the client's signal. */
-#define SWAPP_WATCH_MAX 16
-
 typedef struct {
     swapp_input_role role; /* SWAPP_ROLE_NONE for a plain rescan */
     LONG generation;       /* g_generation when the job started */
     long delay_ms;         /* waited out on the worker before any DDC/CI */
-    int watch_codes[SWAPP_WATCH_MAX]; /* see swapp_watch_switch */
-    size_t n_watch;
-    void (*acquire)(void); /* non-NULL: watch instead of delay */
+    void (*acquire)(void); /* non-NULL: called once the delay is out */
     int trigger_failed;
     swapp_rescan_ctx probed;
 } swapp_job;
@@ -457,198 +452,17 @@ static LRESULT CALLBACK swapp_job_sink_proc(HWND hwnd, UINT msg, WPARAM wp, LPAR
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
-typedef struct {
-    HANDLE handles[SWAPP_WATCH_MAX];
-    size_t n;
-    swapp_physical_group groups[SWAPP_WATCH_MAX];
-    size_t n_groups;
-} swapp_watch_set;
-
-static BOOL CALLBACK swapp_watch_enum_proc(HMONITOR hmon, HDC hdc, LPRECT rect, LPARAM lparam) {
-    (void)hdc;
-    (void)rect;
-    swapp_watch_set *set = (swapp_watch_set *)lparam;
-    DWORD n_physical = 0;
-    if (set->n_groups == SWAPP_WATCH_MAX || !GetNumberOfPhysicalMonitorsFromHMONITOR(hmon, &n_physical)
-        || n_physical == 0) {
-        return TRUE;
-    }
-    PHYSICAL_MONITOR *physical = (PHYSICAL_MONITOR *)calloc(n_physical, sizeof(PHYSICAL_MONITOR));
-    if (!physical) {
-        return TRUE;
-    }
-    if (!GetPhysicalMonitorsFromHMONITOR(hmon, n_physical, physical)) {
-        free(physical);
-        return TRUE;
-    }
-    set->groups[set->n_groups].physical = physical;
-    set->groups[set->n_groups].n_physical = n_physical;
-    set->n_groups++;
-    for (DWORD i = 0; i < n_physical && set->n < SWAPP_WATCH_MAX; i++) {
-        set->handles[set->n++] = physical[i].hPhysicalMonitor;
-    }
-    return TRUE;
-}
-
-/* After a switch to Linux: the window in which the first acquire goes out
- * once the watched monitors are ready, how long a watched monitor may then
- * sit with no signal before the client is asked again, and how many times
- * it is asked again.
- *
- * Measured on this hardware: a monitor answers cleanly on the new input
- * ~1.2-2.1s after the switch, goes busy again (garbage answers) around
- * 3.3-4.2s, and is clean from ~4.2-5.1s on. That first clean answer is
- * misleading -- a modeset at 1.5s left one monitor showing only every other
- * line, and at the old fixed 3s some switches stayed dark -- while at 5s all
- * of them came up. The busy spell is the monitor putting up its "No
- * HDMI-2 signal" message, and a clean answer after it is the real settle
- * point, so a monitor is ready on the first clean answer after a failure
- * seen past BUSY_FROM (earlier failures are ordinary DDC/CI flakes during
- * the first clean spell), or on any clean answer past READY_MIN should the
- * busy spell be missed. Good switches locked 4-7s after the client's
- * modeset, so RETRY is past any of them. That lock takes ~12s from the
- * switch where Windows' takes 1-2s; refresh rate, the monitor's auto input
- * switch and pausing these queries after the acquire made no difference,
- * so it is the hub and the monitor. */
-#define SWAPP_WATCH_BUSY_FROM_MS 3000
-#define SWAPP_WATCH_READY_MIN_MS 5000
-#define SWAPP_WATCH_READY_MAX_MS 8000
-#define SWAPP_WATCH_RETRY_MS     20000
-#define SWAPP_WATCH_RETRIES      2
-/* Between sampling rounds, and between the DDC/CI calls within a round:
- * MCCS wants a gap between a reply and the next request. */
-#define SWAPP_WATCH_ROUND_MS     250
-#define SWAPP_WATCH_GAP_MS       50
-
-typedef struct {
-    int code;   /* the Linux input to watch for, -1 when not watched */
-    int clean;  /* has answered cleanly on code at least once */
-    int busy;   /* then failed past SWAPP_WATCH_BUSY_FROM_MS */
-    int ready;  /* settled: see SWAPP_WATCH_READY_MIN_MS */
-    int locked; /* a Timing Report with a signal came back */
-} swapp_watch;
-
-/* Tells the client when to do its modeset after a switch to Linux, instead
- * of it waiting a fixed time, and asks again if that modeset didn't take.
- *
- * Samples every physical monitor: the input it reports (VCP 0x60) and its
- * Timing Report -- the H/V frequency of the signal it is actually
- * receiving, which is what tells a monitor showing a picture from one
- * sitting on the right input with nothing locked. No signal reads as h=0
- * v=0. Handles of its own, so it never touches the cache; they are assumed
- * to come in the cache's order, which holds while every display answers
- * DDC/CI. One attempt per call: mid-switch the monitor answers garbage, and
- * a failure is itself what the settle detection reads.
- *
- * acquire is called once every watched monitor is ready (see
- * SWAPP_WATCH_READY_MIN_MS), or after SWAPP_WATCH_READY_MAX_MS regardless.
- * Sampling then goes on until every watched monitor has a signal: one that
- * doesn't get one in SWAPP_WATCH_RETRY_MS has acquire called again, up to
- * SWAPP_WATCH_RETRIES times, after which it is given up on. A watched
- * monitor that reports some other input was switched elsewhere and stops
- * being watched. Returns 0 if the job was stopped. */
-static int swapp_watch_switch(const int *watch_codes, size_t n_watch, void (*acquire)(void)) {
-    swapp_watch_set set = {0};
-    EnumDisplayMonitors(NULL, NULL, swapp_watch_enum_proc, (LPARAM)&set);
-
-    swapp_watch watch[SWAPP_WATCH_MAX];
-    for (size_t i = 0; i < SWAPP_WATCH_MAX; i++) {
-        watch[i].code = i < n_watch && i < set.n ? watch_codes[i] : -1;
-        watch[i].clean = 0;
-        watch[i].busy = 0;
-        watch[i].ready = 0;
-        watch[i].locked = 0;
-    }
-
-    ULONGLONG start = GetTickCount64();
-    ULONGLONG last_acquire = 0; /* 0 until the first acquire */
-    int retries = 0;
-    int ok = 1;
-    while (ok) {
-        for (size_t i = 0; i < set.n && ok; i++) {
-            swapp_watch *w = &watch[i];
-            if (w->code < 0 || w->locked) {
-                continue;
-            }
-
-            DWORD cur = 0, max = 0;
-            int has_input = GetVCPFeatureAndVCPFeatureReply(set.handles[i], 0x60, NULL, &cur, &max) != 0;
-            ok = swapp_sleep_ms(SWAPP_WATCH_GAP_MS);
-            MC_TIMING_REPORT tr = {0};
-            int has_timing = GetTimingReport(set.handles[i], &tr) != 0;
-            if (ok) {
-                ok = swapp_sleep_ms(SWAPP_WATCH_GAP_MS);
-            }
-
-            if (has_input && (int)(cur & 0xFF) != w->code) {
-                w->code = -1;
-            } else if (has_timing && (tr.dwHorizontalFrequencyInHZ || tr.dwVerticalFrequencyInHZ)) {
-                w->locked = 1;
-                w->ready = 1;
-            } else if (!w->ready) {
-                ULONGLONG elapsed = GetTickCount64() - start;
-                if (!has_input || !has_timing) {
-                    w->busy |= w->clean && elapsed >= SWAPP_WATCH_BUSY_FROM_MS;
-                } else if (w->busy || elapsed >= SWAPP_WATCH_READY_MIN_MS) {
-                    w->ready = 1;
-                } else {
-                    w->clean = 1;
-                }
-            }
-        }
-
-        size_t pending = 0, unready = 0;
-        for (size_t i = 0; i < set.n; i++) {
-            pending += watch[i].code >= 0 && !watch[i].locked;
-            unready += watch[i].code >= 0 && !watch[i].ready;
-        }
-        ULONGLONG now = GetTickCount64();
-        if (last_acquire == 0) {
-            /* Every watched monitor locking with no modeset at all makes one
-             * pointless, though that isn't expected behind the hub. */
-            if (pending == 0 && n_watch > 0) {
-                break;
-            }
-            if (unready == 0 || now - start >= SWAPP_WATCH_READY_MAX_MS) {
-                acquire();
-                last_acquire = now;
-            }
-        } else if (pending > 0 && now - last_acquire >= SWAPP_WATCH_RETRY_MS) {
-            if (retries == SWAPP_WATCH_RETRIES) {
-                break;
-            }
-            retries++;
-            acquire();
-            last_acquire = now;
-        }
-        if (pending == 0 && last_acquire != 0) {
-            break;
-        }
-        if (ok) {
-            ok = swapp_sleep_ms(SWAPP_WATCH_ROUND_MS);
-        }
-    }
-
-    for (size_t g = 0; g < set.n_groups; g++) {
-        DestroyPhysicalMonitors(set.groups[g].n_physical, set.groups[g].physical);
-        free(set.groups[g].physical);
-    }
-    return ok;
-}
-
 static DWORD WINAPI swapp_job_thread(LPVOID param) {
     swapp_job *job = (swapp_job *)param;
-
-    if (job->acquire && !swapp_watch_switch(job->watch_codes, job->n_watch, job->acquire)) {
-        PostMessageA(g_job_sink, SWAPP_JOB_DONE_MSG, 0, (LPARAM)job);
-        return 0;
-    }
 
     /* Abortable like every other wait here; an aborted job skips straight
      * to reporting, and its (empty) results are discarded. */
     if (job->delay_ms > 0 && !swapp_sleep_ms(job->delay_ms)) {
         PostMessageA(g_job_sink, SWAPP_JOB_DONE_MSG, 0, (LPARAM)job);
         return 0;
+    }
+    if (job->acquire) {
+        job->acquire();
     }
 
     if (job->role != SWAPP_ROLE_NONE) {
@@ -675,8 +489,7 @@ static DWORD WINAPI swapp_job_thread(LPVOID param) {
     return 0;
 }
 
-static void swapp_job_start(swapp_input_role role, long delay_ms, const int *watch_codes, size_t n_watch,
-                            void (*acquire)(void)) {
+static void swapp_job_start(swapp_input_role role, long delay_ms, void (*acquire)(void)) {
     if (InterlockedCompareExchange(&g_cancel, 0, 0) || InterlockedCompareExchange(&g_busy, 1, 0)) {
         return;
     }
@@ -698,10 +511,6 @@ static void swapp_job_start(swapp_input_role role, long delay_ms, const int *wat
     }
     job->role = role;
     job->delay_ms = delay_ms;
-    job->n_watch = n_watch < SWAPP_WATCH_MAX ? n_watch : SWAPP_WATCH_MAX;
-    for (size_t i = 0; i < job->n_watch; i++) {
-        job->watch_codes[i] = watch_codes[i];
-    }
     job->acquire = acquire;
     job->generation = InterlockedCompareExchange(&g_generation, 0, 0);
     InterlockedExchange(&g_running_generation, job->generation);
@@ -718,19 +527,19 @@ static void swapp_job_start(swapp_input_role role, long delay_ms, const int *wat
 }
 
 void swapp_monitors_rescan_async(void) {
-    swapp_job_start(SWAPP_ROLE_NONE, 0, NULL, 0, NULL);
+    swapp_job_start(SWAPP_ROLE_NONE, 0, NULL);
 }
 
 void swapp_monitors_rescan_delayed_async(long delay_ms) {
-    swapp_job_start(SWAPP_ROLE_NONE, delay_ms, NULL, 0, NULL);
+    swapp_job_start(SWAPP_ROLE_NONE, delay_ms, NULL);
 }
 
-void swapp_monitors_rescan_watched_async(const int *watch_codes, size_t n_watch, void (*acquire)(void)) {
-    swapp_job_start(SWAPP_ROLE_NONE, 0, watch_codes, n_watch, acquire);
+void swapp_monitors_rescan_acquire_async(long delay_ms, void (*acquire)(void)) {
+    swapp_job_start(SWAPP_ROLE_NONE, delay_ms, acquire);
 }
 
 void swapp_monitors_trigger_async(swapp_input_role role) {
-    swapp_job_start(role, 0, NULL, 0, NULL);
+    swapp_job_start(role, 0, NULL);
 }
 
 /* --- OS role persistence: HKCU\Software\Swapp\Roles\<label> --- */

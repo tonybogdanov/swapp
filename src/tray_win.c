@@ -28,6 +28,7 @@
 #define SWAPP_ID_QUIT         1001
 #define SWAPP_HOTKEY_F16      1
 #define SWAPP_HOTKEY_F14      2
+#define SWAPP_HOTKEY_F15      3
 #define SWAPP_F16_DOUBLE_TAP_MS 1000
 #define SWAPP_RESCAN_TIMER    2
 #define SWAPP_RESCAN_SETTLE_MS 3000
@@ -65,6 +66,9 @@
 #define SWAPP_MAIN_LINUX_ALL_ID   4107
 #define SWAPP_TABLE_SWITCH_ID 4102
 #define SWAPP_SWITCH_RESCAN_DELAY_MS 2500 /* for the monitor to finish changing inputs */
+/* After a switch to Linux, before the client's modeset: an earlier one
+ * trains against a monitor still putting up its "no signal" message. */
+#define SWAPP_SWITCH_ACQUIRE_DELAY_MS 5000
 #define SWAPP_TABLE_ASSIGN_WINDOWS_ID 4103
 #define SWAPP_TABLE_ASSIGN_LINUX_ID   4104
 #define SWAPP_TABLE_ASSIGN_NONE_ID    4105
@@ -1123,20 +1127,10 @@ static void swapp_main_after_switch(int to_linux) {
     swapp_monitors_set_job_callback(swapp_main_job_done);
     if (to_linux) {
         /* Switched to the client's input: it has to force a modeset to start
-         * driving the monitor again (see swapp_monitors_acquire_async). The
-         * watch sends `acquire` as soon as every monitor now on its Linux
-         * input has finished switching, then watches each until it shows a
-         * signal and asks again if it doesn't: the modeset doesn't always
-         * take, and the monitor then just sleeps. */
-        int watch[16]; /* SWAPP_WATCH_MAX; any more go unwatched */
-        size_t n_watch = 0;
-        for (size_t i = 0; i < swapp_monitors_count() && i < 16; i++) {
-            char label[128];
-            swapp_monitors_label(i, label, sizeof(label));
-            int code = swapp_roles_code_for(label, SWAPP_ROLE_LINUX);
-            watch[n_watch++] = code >= 0 && swapp_monitors_active_input(i) == code ? code : -1;
-        }
-        swapp_monitors_rescan_watched_async(watch, n_watch, swapp_main_acquire);
+         * driving the monitor again (see swapp_monitors_acquire_async), once
+         * the monitor has had time to finish switching. Should it not take,
+         * F15 sends it again. */
+        swapp_monitors_rescan_acquire_async(SWAPP_SWITCH_ACQUIRE_DELAY_MS, swapp_main_acquire);
     } else {
         swapp_monitors_rescan_delayed_async(SWAPP_SWITCH_RESCAN_DELAY_MS);
     }
@@ -1979,6 +1973,12 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                     swapp_main_next_screen();
                 }
             }
+            /* F15 re-sends the client's modeset by hand, for a screen that
+             * stayed on "no signal" after a switch to Linux. A single
+             * press: it only ever wakes a screen, never takes one away. */
+            if (wp == SWAPP_HOTKEY_F15) {
+                swapp_net_send_acquire();
+            }
             return 0;
         case WM_DEVICECHANGE:
             if (wp == DBT_DEVICEARRIVAL || wp == DBT_DEVICEREMOVECOMPLETE) {
@@ -2175,6 +2175,7 @@ void swapp_tray_run(const char *tooltip) {
 
     RegisterHotKey(hwnd, SWAPP_HOTKEY_F16, MOD_NOREPEAT, VK_F16);
     RegisterHotKey(hwnd, SWAPP_HOTKEY_F14, MOD_NOREPEAT, VK_F14);
+    RegisterHotKey(hwnd, SWAPP_HOTKEY_F15, MOD_NOREPEAT, VK_F15);
 
     g_nid.cbSize = sizeof(g_nid);
     g_nid.hWnd = hwnd;
@@ -2222,6 +2223,7 @@ void swapp_tray_run(const char *tooltip) {
         UnregisterDeviceNotification(g_dev_notify);
     }
     UnregisterHotKey(hwnd, SWAPP_HOTKEY_F14);
+    UnregisterHotKey(hwnd, SWAPP_HOTKEY_F15);
     UnregisterHotKey(hwnd, SWAPP_HOTKEY_F16);
     Shell_NotifyIconA(NIM_DELETE, &g_nid);
     if (g_list_hwnd) {

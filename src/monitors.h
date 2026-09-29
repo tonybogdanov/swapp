@@ -18,15 +18,13 @@ void swapp_monitors_rescan_async(void);
  * the querying waits. An abort during the wait ends it like any job. */
 void swapp_monitors_rescan_delayed_async(long delay_ms);
 
-/* Windows only. The rescan that follows a switch to Linux. Instead of a
- * fixed delay, the worker first watches the monitors: watch_codes, indexed
- * like the cache, names the Linux input each monitor is now on (-1: not
- * watched). acquire is called on the worker thread once the watched
- * monitors have finished switching -- the cue for the client's modeset --
- * and again whenever one then goes too long without a signal, up to a fixed
- * number of times. The rescan runs once each watched monitor has a signal
- * or has been given up on. */
-void swapp_monitors_rescan_watched_async(const int *watch_codes, size_t n_watch, void (*acquire)(void));
+/* Windows only. The rescan that follows a switch to Linux: the same delayed
+ * rescan, with acquire called on the worker thread once the delay is out --
+ * the cue for the client's modeset -- and the scan run after it. A fixed
+ * delay rather than watching the monitors settle: the watch, which fired
+ * the modeset as soon as DDC/CI looked ready and repeated it while a monitor
+ * had no signal, left screens dark more often than a plain wait did. */
+void swapp_monitors_rescan_acquire_async(long delay_ms, void (*acquire)(void));
 
 /* For every monitor in the cache, tells it to deselect its active input
  * (VCP 0x60 -> 0, the MCCS "Auto Select" sentinel) so compliant firmware
@@ -160,8 +158,9 @@ void swapp_monitors_abort(void);
 
 /* Linux (client) only. Re-acquires the monitors after the server switched
  * one to this machine's input: forces a modeset through KWin's DPMS off/on
- * right away -- the server only sends `acquire` once it has seen the monitor
- * finish switching. Needed because the MST
+ * right away -- the server only sends `acquire` once the monitor has had
+ * time to finish switching. Also run by hand from F15, when a screen stays
+ * on "no signal" anyway. Needed because the MST
  * hub doesn't forward the sink's hotplug, so without a modeset i915 never
  * retrains the link and the screen stays dark (the same thing a lid close
  * and open happens to fix). Runs on its own thread; no DDC/CI traffic. */

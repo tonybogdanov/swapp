@@ -158,10 +158,9 @@ void swapp_net_set_assign_callback(void (*callback)(int monitor_index, int input
  * and the client forces a modeset (swapp_monitors_acquire_async) so it
  * actually starts driving the monitor again. The server is the side that
  * knows both the switch happened and whose input it went to, and the only
- * side that can see the monitor: it sends `acquire` once the monitor answers
- * cleanly on the new input past a fixed floor (an earlier modeset leaves the
- * screen dark or garbled; see SWAPP_WATCH_READY_MIN_MS), and again if no
- * signal arrives after it. */
+ * side that can see the monitor: it sends `acquire` a fixed
+ * SWAPP_SWITCH_ACQUIRE_DELAY_MS after the switch (an earlier modeset leaves
+ * the screen dark or garbled), and again whenever F15 is pressed on it. */
 
 /* Switching everything to one machine -- the Windows / Linux buttons -- is
  * the per-cell Switch applied to every monitor's input assigned to that
