@@ -303,7 +303,7 @@ static gboolean swapp_hotkey_fired(gpointer user_data) {
 
 static void swapp_main_open_or_next_screen(void);
 
-/* F15 opens the window: a single press, unlike F16. Showing a window takes
+/* F14 opens the window: a single press, unlike F16. Showing a window takes
  * nothing away, so there is nothing for a second tap to guard against. */
 static gboolean swapp_hotkey_open_fired(gpointer user_data) {
     (void)user_data;
@@ -319,14 +319,14 @@ static gboolean swapp_hotkey_open_fired(gpointer user_data) {
  * Wayland session (no XWayland) this finds no display and the hotkey just
  * never fires; there is no portable Wayland equivalent. */
 #define SWAPP_F16_KEYCODE 194  /* evdev KEY_F16 (186) + the X11 offset of 8 */
-#define SWAPP_F15_KEYCODE 193  /* evdev KEY_F15 (185) + the X11 offset of 8 */
+#define SWAPP_F14_KEYCODE 192  /* evdev KEY_F14 (184) + the X11 offset of 8 */
 
 static gpointer swapp_hotkey_thread(gpointer user_data) {
     (void)user_data;
 
     Display *display = XOpenDisplay(NULL);
     if (!display) {
-        g_warning("swapp: no X11 display available; F16/F15 global hotkeys disabled");
+        g_warning("swapp: no X11 display available; F16/F14 global hotkeys disabled");
         return NULL;
     }
 
@@ -338,9 +338,9 @@ static gpointer swapp_hotkey_thread(gpointer user_data) {
     if (keycode == 0) {
         keycode = SWAPP_F16_KEYCODE;
     }
-    KeyCode open_keycode = XKeysymToKeycode(display, XK_F15);
+    KeyCode open_keycode = XKeysymToKeycode(display, XK_F14);
     if (open_keycode == 0) {
-        open_keycode = SWAPP_F15_KEYCODE;
+        open_keycode = SWAPP_F14_KEYCODE;
     }
 
     static const unsigned int lock_masks[] = {0, Mod2Mask, LockMask, Mod2Mask | LockMask};

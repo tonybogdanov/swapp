@@ -27,7 +27,7 @@
 #define SWAPP_TRAY_UID        1
 #define SWAPP_ID_QUIT         1001
 #define SWAPP_HOTKEY_F16      1
-#define SWAPP_HOTKEY_F15      2
+#define SWAPP_HOTKEY_F14      2
 #define SWAPP_F16_DOUBLE_TAP_MS 1000
 #define SWAPP_RESCAN_TIMER    2
 #define SWAPP_RESCAN_SETTLE_MS 3000
@@ -1968,11 +1968,11 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                     armed_at = now;
                 }
             }
-            /* F15 opens the window: a single press, unlike F16. Showing a
+            /* F14 opens the window: a single press, unlike F16. Showing a
              * window takes nothing away, so there is nothing for a second
              * tap to guard against. Pressed again with the window already
              * up, it moves the window on to the next screen instead. */
-            if (wp == SWAPP_HOTKEY_F15) {
+            if (wp == SWAPP_HOTKEY_F14) {
                 BOOL was_open = g_main_hwnd && IsWindowVisible(g_main_hwnd) && !IsIconic(g_main_hwnd);
                 swapp_show_main_window();
                 if (was_open) {
@@ -2174,7 +2174,7 @@ void swapp_tray_run(const char *tooltip) {
     */
 
     RegisterHotKey(hwnd, SWAPP_HOTKEY_F16, MOD_NOREPEAT, VK_F16);
-    RegisterHotKey(hwnd, SWAPP_HOTKEY_F15, MOD_NOREPEAT, VK_F15);
+    RegisterHotKey(hwnd, SWAPP_HOTKEY_F14, MOD_NOREPEAT, VK_F14);
 
     g_nid.cbSize = sizeof(g_nid);
     g_nid.hWnd = hwnd;
@@ -2221,7 +2221,7 @@ void swapp_tray_run(const char *tooltip) {
     if (g_dev_notify) {
         UnregisterDeviceNotification(g_dev_notify);
     }
-    UnregisterHotKey(hwnd, SWAPP_HOTKEY_F15);
+    UnregisterHotKey(hwnd, SWAPP_HOTKEY_F14);
     UnregisterHotKey(hwnd, SWAPP_HOTKEY_F16);
     Shell_NotifyIconA(NIM_DELETE, &g_nid);
     if (g_list_hwnd) {
