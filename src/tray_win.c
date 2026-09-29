@@ -31,6 +31,8 @@
 #define SWAPP_F16_DOUBLE_TAP_MS 1000
 #define SWAPP_RESCAN_TIMER    2
 #define SWAPP_RESCAN_SETTLE_MS 3000
+/* How soon a scan that found no monitors at all is tried again. */
+#define SWAPP_RESCAN_EMPTY_MS 5000
 #define SWAPP_NET_STATE_MSG   (WM_APP + 5)
 #define SWAPP_NET_RESCAN_MSG  (WM_APP + 6)
 #define SWAPP_NET_SWITCH_MSG  (WM_APP + 7)
@@ -1034,6 +1036,16 @@ static void swapp_main_update_spinner(void) {
  * sink window rather than calling back from the worker. */
 static void swapp_main_job_done(int trigger_failed) {
     (void)trigger_failed;
+    /* No monitors at all is never this machine's real state -- it is wired
+     * to them -- but a scan that ran while they were powered off, or while
+     * Windows was still re-plugging them. Seen after a switch to Linux that
+     * didn't take: the monitors were power-cycled, the post-switch scan
+     * landed in the dark, and nothing ever looked again, leaving the server
+     * "scanning" for good and F16 dead. So keep looking until they are
+     * back; an empty scan is cheap. */
+    if (swapp_monitors_count() == 0 && g_tray_hwnd) {
+        SetTimer(g_tray_hwnd, SWAPP_RESCAN_TIMER, SWAPP_RESCAN_EMPTY_MS, NULL);
+    }
     /* Results go out the moment they land rather than waiting to be asked
      * for; with no client this is a no-op and the list is the server's own. */
     swapp_net_send_monitors();
@@ -1980,8 +1992,9 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             if (wp == SWAPP_RESCAN_TIMER) {
                 KillTimer(hwnd, SWAPP_RESCAN_TIMER);
                 /* Dropped if a job is already running -- that job ends in a
-                 * fresh enumeration of its own anyway. */
-                swapp_monitors_rescan_async();
+                 * fresh enumeration of its own anyway, and re-arms this if
+                 * it finds nothing. */
+                swapp_main_rescan();
             }
             return 0;
         case WM_COMMAND:
