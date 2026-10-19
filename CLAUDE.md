@@ -85,19 +85,22 @@ served whatever is already there, and one leaving takes nothing with it. The
 link gates exactly one thing: switching *to Linux* -- the button, and a
 single cell from the table menu alike -- which would hand a screen to a
 machine that is not there, with nobody to hand it back. The
-way back -- switch-all-to-Windows, and F16 -- stays live precisely because it
+way back -- switch-all-to-Windows, and F17 -- stays live precisely because it
 is the way back.
 
 Startup is otherwise inert -- the old monitor window and the hotplug watch
 are commented out in `src/tray_linux.c` and `src/tray_win.c`, waiting on this
 split.
 
-F16 means "bring both monitors to *this* machine": on the server it is the
+F17 means "bring both monitors to *this* machine": on the server it is the
 Switch-all-to-Windows button, on the client Switch-all-to-Linux, both under
 the same guard (settled server, every monitor fully assigned). So whichever
-machine the keyboard is plugged into, F16 takes the screens there. It is a
-double tap (second press within 1s; holding doesn't count) so a stray press
-can't take both screens away.
+machine the keyboard is plugged into, F17 takes the screens there. It is a
+single press and deliberately a key no ordinary keyboard has: it is sent only
+by a keyboard-level macro (F16 on the keyboard tells the CS62KM KM switch to
+move keyboard and mouse, then sends F17 to the machine that received them),
+so a stray press is not a concern. The app never binds F16, so the keyboard
+is free to use it for that macro.
 
 ### Topology is assigned, not detected
 

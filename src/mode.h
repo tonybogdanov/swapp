@@ -5,7 +5,7 @@
  * the Windows build is the server, the Linux build is the client. The mode
  * is a label for the role each machine plays in the pair; the two builds
  * still behave the same locally (enumerate monitors, assign roles, switch
- * on F16). Nothing is exchanged between them yet. */
+ * on F17). Nothing is exchanged between them yet. */
 typedef enum {
     SWAPP_MODE_CLIENT = 0,
     SWAPP_MODE_SERVER = 1,

@@ -140,7 +140,7 @@ void swapp_monitors_trigger_async(swapp_input_role role);
 
 /* Nonzero while either job is still running. Only one runs at a time -- a
  * request made while one is in flight is dropped. The UI replaces its rows
- * with a spinner and ignores F16 while this holds. */
+ * with a spinner and ignores F17 while this holds. */
 int swapp_monitors_busy(void);
 
 /* Asks a running job to stop at its next checkpoint and discard what it

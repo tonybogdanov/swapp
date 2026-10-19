@@ -26,10 +26,9 @@
 #define SWAPP_TRAY_MSG        (WM_APP + 1)
 #define SWAPP_TRAY_UID        1
 #define SWAPP_ID_QUIT         1001
-#define SWAPP_HOTKEY_F16      1
+#define SWAPP_HOTKEY_F17      1
 #define SWAPP_HOTKEY_F14      2
 #define SWAPP_HOTKEY_F15      3
-#define SWAPP_F16_DOUBLE_TAP_MS 1000
 #define SWAPP_RESCAN_TIMER    2
 #define SWAPP_RESCAN_SETTLE_MS 3000
 /* How soon a scan that found no monitors at all is tried again. */
@@ -83,7 +82,7 @@
 DEFINE_GUID(SWAPP_GUID_DEVINTERFACE_MONITOR, 0xe6f07b5f, 0xee97, 0x4a90,
             0xb0, 0x76, 0x33, 0xf5, 0x7b, 0xf4, 0xea, 0xa7);
 
-/* Tray icon data, kept at file scope so the F16 hotkey handler in
+/* Tray icon data, kept at file scope so the F17 hotkey handler in
  * swapp_wnd_proc can show a balloon notification off the same icon that
  * swapp_tray_run registered -- only one tray icon ever exists per process. */
 static NOTIFYICONDATAA g_nid = {0};
@@ -1045,7 +1044,7 @@ static void swapp_main_job_done(int trigger_failed) {
      * Windows was still re-plugging them. Seen after a switch to Linux that
      * didn't take: the monitors were power-cycled, the post-switch scan
      * landed in the dark, and nothing ever looked again, leaving the server
-     * "scanning" for good and F16 dead. So keep looking until they are
+     * "scanning" for good and F17 dead. So keep looking until they are
      * back; an empty scan is cheap. */
     if (swapp_monitors_count() == 0 && g_tray_hwnd) {
         SetTimer(g_tray_hwnd, SWAPP_RESCAN_TIMER, SWAPP_RESCAN_EMPTY_MS, NULL);
@@ -1944,27 +1943,20 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         case WM_HOTKEY:
             /* Ignored outright while a job is querying the monitors --
              * same rule as the buttons, which aren't on screen just then. */
-            /* F16 on this machine takes the monitors for this machine:
+            /* F17 on this machine takes the monitors for this machine:
              * exactly the Windows button, guarded by the same condition
              * (checked inside). Whichever machine the keyboard is plugged
-             * into, F16 brings both screens to it. */
-            if (wp == SWAPP_HOTKEY_F16) {
-                /* A double tap, not a single press: the first arms, and
-                 * only a second within SWAPP_F16_DOUBLE_TAP_MS acts, so a
-                 * stray press can't yank both screens away. Registered
-                 * with MOD_NOREPEAT, so holding the key doesn't count. */
-                static ULONGLONG armed_at = 0;
-                ULONGLONG now = GetTickCount64();
-                if (armed_at != 0 && now - armed_at <= SWAPP_F16_DOUBLE_TAP_MS) {
-                    armed_at = 0;
-                    swapp_main_switch_all(SWAPP_ROLE_WINDOWS);
-                } else {
-                    armed_at = now;
-                }
+             * into, F17 brings both screens to it.
+             *
+             * A single press. F17 is not on any ordinary keyboard; it is
+             * sent only by a keyboard-level macro (F16 on the keyboard
+             * switches the KM and then sends F17), so there is no stray
+             * press to guard against. Registered with MOD_NOREPEAT, so
+             * holding the key fires once. */
+            if (wp == SWAPP_HOTKEY_F17) {
+                swapp_main_switch_all(SWAPP_ROLE_WINDOWS);
             }
-            /* F14 opens the window: a single press, unlike F16. Showing a
-             * window takes nothing away, so there is nothing for a second
-             * tap to guard against. Pressed again with the window already
+            /* F14 opens the window. Pressed again with the window already
              * up, it moves the window on to the next screen instead. */
             if (wp == SWAPP_HOTKEY_F14) {
                 BOOL was_open = g_main_hwnd && IsWindowVisible(g_main_hwnd) && !IsIconic(g_main_hwnd);
@@ -2161,7 +2153,7 @@ void swapp_tray_run(const char *tooltip) {
      * runs behind them, rather than the app being invisible for however
      * long DDC/CI probing takes. The job is started first so the window
      * opens already showing its spinner instead of a set of live-looking
-     * buttons backed by an empty cache. Until it lands F16 does nothing. */
+     * buttons backed by an empty cache. Until it lands F17 does nothing. */
     /*
     swapp_monitors_rescan_async();
     swapp_show_monitor_list();
@@ -2173,7 +2165,7 @@ void swapp_tray_run(const char *tooltip) {
     g_dev_notify = RegisterDeviceNotificationA(hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
     */
 
-    RegisterHotKey(hwnd, SWAPP_HOTKEY_F16, MOD_NOREPEAT, VK_F16);
+    RegisterHotKey(hwnd, SWAPP_HOTKEY_F17, MOD_NOREPEAT, VK_F17);
     RegisterHotKey(hwnd, SWAPP_HOTKEY_F14, MOD_NOREPEAT, VK_F14);
     RegisterHotKey(hwnd, SWAPP_HOTKEY_F15, MOD_NOREPEAT, VK_F15);
 
@@ -2207,7 +2199,7 @@ void swapp_tray_run(const char *tooltip) {
     /* The server owns the monitors, so it scans them at startup rather than
      * when a client turns up: probing capabilities over DDC/CI takes
      * seconds, and paying that once at launch means the first client (and
-     * the first F16) finds a list already there. */
+     * the first F17) finds a list already there. */
     swapp_monitors_set_job_callback(swapp_main_job_done);
     swapp_monitors_rescan_async();
 
@@ -2224,7 +2216,7 @@ void swapp_tray_run(const char *tooltip) {
     }
     UnregisterHotKey(hwnd, SWAPP_HOTKEY_F14);
     UnregisterHotKey(hwnd, SWAPP_HOTKEY_F15);
-    UnregisterHotKey(hwnd, SWAPP_HOTKEY_F16);
+    UnregisterHotKey(hwnd, SWAPP_HOTKEY_F17);
     Shell_NotifyIconA(NIM_DELETE, &g_nid);
     if (g_list_hwnd) {
         DestroyWindow(g_list_hwnd);

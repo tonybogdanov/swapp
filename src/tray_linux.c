@@ -279,32 +279,23 @@ static void swapp_show_monitor_list(void) {
 static void swapp_client_switch_all(int role);
 static void swapp_show_main_window(void);
 
-#define SWAPP_F16_DOUBLE_TAP_MS 1000
-
 static gboolean swapp_hotkey_fired(gpointer user_data) {
     (void)user_data;
-    /* F16 on this machine takes the monitors for this machine: exactly the
+    /* F17 on this machine takes the monitors for this machine: exactly the
      * Linux button, under the same condition. Whichever machine the
-     * keyboard is plugged into, F16 brings both screens to it.
+     * keyboard is plugged into, F17 brings both screens to it.
      *
-     * A double tap, not a single press: the first arms, and only a second
-     * within SWAPP_F16_DOUBLE_TAP_MS acts, so a stray press can't yank both
-     * screens away. Key repeat never gets here (see swapp_hotkey_thread). */
-    static gint64 armed_at = 0;
-    gint64 now = g_get_monotonic_time();
-    if (armed_at != 0 && now - armed_at <= SWAPP_F16_DOUBLE_TAP_MS * 1000) {
-        armed_at = 0;
-        swapp_client_switch_all(SWAPP_ROLE_LINUX);
-    } else {
-        armed_at = now;
-    }
+     * A single press. F17 is not on any ordinary keyboard; it is sent only
+     * by a keyboard-level macro (F16 on the keyboard switches the KM and
+     * then sends F17), so there is no stray press to guard against. Key
+     * repeat never gets here (see swapp_hotkey_thread). */
+    swapp_client_switch_all(SWAPP_ROLE_LINUX);
     return G_SOURCE_REMOVE;
 }
 
 static void swapp_main_open_or_next_screen(void);
 
-/* F14 opens the window: a single press, unlike F16. Showing a window takes
- * nothing away, so there is nothing for a second tap to guard against. */
+/* F14 opens the window. */
 static gboolean swapp_hotkey_open_fired(gpointer user_data) {
     (void)user_data;
     swapp_main_open_or_next_screen();
@@ -321,13 +312,13 @@ static gboolean swapp_hotkey_acquire_fired(gpointer user_data) {
 }
 
 /* Runs on its own X11 connection so it can block in XNextEvent without
- * stalling GTK's main loop. Grabs F16 across every combination of the lock
+ * stalling GTK's main loop. Grabs F17 across every combination of the lock
  * modifiers (NumLock, CapsLock) since XGrabKey requires an exact
  * modifier-state match and either can be toggled on when the key is
  * pressed. Global key grabs are an X11-only mechanism -- under a pure
  * Wayland session (no XWayland) this finds no display and the hotkey just
  * never fires; there is no portable Wayland equivalent. */
-#define SWAPP_F16_KEYCODE 194  /* evdev KEY_F16 (186) + the X11 offset of 8 */
+#define SWAPP_F17_KEYCODE 195  /* evdev KEY_F17 (187) + the X11 offset of 8 */
 #define SWAPP_F14_KEYCODE 192  /* evdev KEY_F14 (184) + the X11 offset of 8 */
 #define SWAPP_F15_KEYCODE 193  /* evdev KEY_F15 (185) + the X11 offset of 8 */
 
@@ -336,17 +327,17 @@ static gpointer swapp_hotkey_thread(gpointer user_data) {
 
     Display *display = XOpenDisplay(NULL);
     if (!display) {
-        g_warning("swapp: no X11 display available; F14/F15/F16 global hotkeys disabled");
+        g_warning("swapp: no X11 display available; F14/F15/F17 global hotkeys disabled");
         return NULL;
     }
 
-    /* Most layouts stop at F12, leaving XK_F16 unmapped and this lookup
+    /* Most layouts stop at F12, leaving XK_F17 unmapped and this lookup
      * returning 0 even though the hardware can still send the key. The
-     * kernel's KEY_F16 (186) always reaches X as keycode 186 + 8, so grab
+     * kernel's KEY_F17 (187) always reaches X as keycode 187 + 8, so grab
      * that scancode directly rather than giving up on the hotkey. */
-    KeyCode keycode = XKeysymToKeycode(display, XK_F16);
+    KeyCode keycode = XKeysymToKeycode(display, XK_F17);
     if (keycode == 0) {
-        keycode = SWAPP_F16_KEYCODE;
+        keycode = SWAPP_F17_KEYCODE;
     }
     KeyCode open_keycode = XKeysymToKeycode(display, XK_F14);
     if (open_keycode == 0) {
@@ -375,7 +366,7 @@ static gpointer swapp_hotkey_thread(gpointer user_data) {
 
     /* Lives for the whole process: the app exits via gtk_main_quit from the
      * tray menu, which ends this thread along with everything else. */
-    /* Holding the key must not count as a double tap. With detectable
+    /* Holding a key must fire once, not once per repeat. With detectable
      * auto-repeat X sends a held key as repeated KeyPress with no KeyRelease
      * in between, so only a press after a release is a real press. */
     XkbSetDetectableAutoRepeat(display, True, NULL);
@@ -1197,7 +1188,7 @@ static int swapp_client_can_switch_all(void) {
     return monitors > 0 && complete;
 }
 
-/* The Windows / Linux buttons and F16: every monitor to role's input. The
+/* The Windows / Linux buttons and F17: every monitor to role's input. The
  * server does the switching, and ignores monitors already there. */
 static void swapp_client_switch_all(int role) {
     if (swapp_client_can_switch_all()) {
@@ -1928,7 +1919,7 @@ void swapp_tray_run(const char *tooltip) {
      * runs behind them, rather than the app being invisible for however
      * long DDC/CI probing takes. The job is started first so the window
      * opens already showing its spinner instead of a set of live-looking
-     * buttons backed by an empty cache. Until it lands F16 does nothing. */
+     * buttons backed by an empty cache. Until it lands F17 does nothing. */
     /*
     swapp_monitors_set_job_callback(swapp_list_job_done);
     swapp_monitors_rescan_async();
