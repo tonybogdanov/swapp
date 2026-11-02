@@ -1295,7 +1295,7 @@ static gboolean swapp_main_spin(gpointer user_data) {
     return G_SOURCE_CONTINUE;
 }
 
-/* The spinner only animates while something is pending; with both lines
+/* The spinner only animates while something is pending; with all three lines
  * checked there is nothing left to redraw. Today the monitor line is always
  * pending, so this only ever starts it -- that changes when the server
  * starts serving the list. */
@@ -1381,8 +1381,8 @@ static void swapp_show_main_window(void) {
         GtkWidget *rows = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
         gtk_box_pack_start(GTK_BOX(bottom), rows, TRUE, TRUE, 0);
         g_status_icon = swapp_row_new(rows, &g_status_label);
-        g_monitors_icon = swapp_row_new(rows, &g_monitors_label);
         g_audio_icon = swapp_row_new(rows, &g_audio_label);
+        g_monitors_icon = swapp_row_new(rows, &g_monitors_label);
 
         /* The big buttons, right of the rows: all-to-Windows, all-to-Linux,
          * then refresh at the far right -- same order as the server. */

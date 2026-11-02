@@ -1027,7 +1027,7 @@ static void swapp_main_refresh_status(void) {
     swapp_table_set(snapshot);
 }
 
-/* The spinner only animates while something is pending; once both rows are
+/* The spinner only animates while something is pending; once all three rows are
  * resolved there is nothing left to redraw. */
 static void swapp_main_update_spinner(void) {
     if (!g_main_hwnd) {
@@ -1572,15 +1572,15 @@ static void swapp_show_main_window(void) {
 
         int rows_top = margin + table_height + margin;
         /* The status rows give up their right end to the big buttons, each
-         * as tall as both rows together: all-to-Windows, all-to-Linux, then
+         * as tall as all three rows together: all-to-Windows, all-to-Linux, then
          * refresh at the far right. */
         int button_width = swapp_dpi_scale(SWAPP_REFRESH_WIDTH);
         int button_gap = swapp_dpi_scale(8);
         int buttons_left = client_width - margin - 3 * button_width - 2 * button_gap;
         int rows_width = buttons_left - margin;
         swapp_row_create(&g_client_row, g_main_hwnd, rows_top, rows_width);
-        swapp_row_create(&g_monitors_row, g_main_hwnd, rows_top + row_height, rows_width);
-        swapp_row_create(&g_audio_row, g_main_hwnd, rows_top + 2 * row_height, rows_width);
+        swapp_row_create(&g_audio_row, g_main_hwnd, rows_top + row_height, rows_width);
+        swapp_row_create(&g_monitors_row, g_main_hwnd, rows_top + 2 * row_height, rows_width);
 
         static const struct {
             const char *text;
