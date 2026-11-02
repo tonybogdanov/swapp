@@ -456,6 +456,10 @@ void swapp_audio_stop(int remove_device) {
     }
 }
 
+int swapp_audio_failed(void) {
+    return 0; /* a missing server is retried forever, so there is no terminal state */
+}
+
 int swapp_audio_ok(void) {
     g_mutex_lock(&g_lock);
     int ok = g_sending;

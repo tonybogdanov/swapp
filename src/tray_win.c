@@ -978,7 +978,10 @@ static void swapp_main_refresh_status(void) {
 
     char audio[SWAPP_AUDIO_STATUS_MAX];
     swapp_audio_status_text(audio, sizeof(audio));
-    swapp_row_set(&g_audio_row, swapp_audio_ok() ? SWAPP_ICON_CHECK : SWAPP_ICON_SPINNER, audio);
+    swapp_row_set(&g_audio_row,
+                  swapp_audio_ok() ? SWAPP_ICON_CHECK
+                                   : (swapp_audio_failed() ? SWAPP_ICON_ERROR : SWAPP_ICON_SPINNER),
+                  audio);
 
     /* A rescan only needs no scan already running: the result is the
      * server's own, whether or not there is a client to forward it to. */
@@ -1034,7 +1037,8 @@ static void swapp_main_update_spinner(void) {
         return;
     }
     int pending = (swapp_net_get_state() == SWAPP_NET_WAITING) || swapp_monitors_busy()
-                  || swapp_monitors_count() == 0 || !swapp_audio_ok();
+                  || swapp_monitors_count() == 0
+                  || (!swapp_audio_ok() && !swapp_audio_failed());
     if (pending) {
         SetTimer(g_main_hwnd, SWAPP_MAIN_SPIN_TIMER, SWAPP_MAIN_SPIN_MS, NULL);
     } else {

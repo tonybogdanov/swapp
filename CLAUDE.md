@@ -80,7 +80,11 @@ at the top of the menu).
 
 Audio is relayed over UDP on the same port number, client to server only: a
 WiFi retransmit stall on TCP would delay every later frame, and `nc` stays a
-working debugging client. The server trusts datagrams only from the connected
+working debugging client. Only the client sends because audio flows one way,
+and the laptop drops unsolicited inbound traffic, so server-to-client UDP
+wouldn't cross anyway. Windows Firewall rules are per protocol, so the TCP
+allowance doesn't cover UDP: it was verified at the first hardware gate that
+the datagrams arrive, and Swapp can't add a rule itself (no elevation). The server trusts datagrams only from the connected
 client's IP. The client applies no gain, because the null sink's monitor
 already carries the sink volume (applying it again was caught in testing). The
 sink is kept across update handovers, so music never falls back to the laptop

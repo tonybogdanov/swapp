@@ -37,7 +37,7 @@ uint32_t swapp_jitter_stream(const swapp_jitter *j) { return j->stream_id; }
 
 void swapp_jitter_push(swapp_jitter *j, uint32_t stream_id, uint32_t seq, const uint8_t *data, size_t len) {
     size_t slot;
-    /* An empty payload is the client's reachability probe: it carries no audio. */
+    /* An empty payload carries no audio, so it is never queued. */
     if (len == 0 || len > SWAPP_AUDIO_MAX_PAYLOAD) return;
 
     if (!j->has_stream || stream_id != j->stream_id) {

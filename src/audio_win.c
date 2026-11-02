@@ -748,6 +748,13 @@ int swapp_audio_ok(void) {
     return ok;
 }
 
+int swapp_audio_failed(void) {
+    EnterCriticalSection(&g_lock);
+    int failed = g_udp_failed;
+    LeaveCriticalSection(&g_lock);
+    return failed;
+}
+
 void swapp_audio_status_text(char *buf, size_t buf_size) {
     EnterCriticalSection(&g_lock);
     _snprintf_s(buf, buf_size, _TRUNCATE, "%s", g_text);

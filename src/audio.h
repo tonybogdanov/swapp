@@ -16,7 +16,7 @@
 #define SWAPP_AUDIO_CHANNELS 2
 #define SWAPP_AUDIO_BITRATE 256000
 #define SWAPP_AUDIO_FRAME 480      /* samples per channel per datagram: 10 ms */
-#define SWAPP_AUDIO_TARGET_MS 40   /* jitter-buffer target; tuned in Stage 2 */
+#define SWAPP_AUDIO_TARGET_MS 40   /* jitter-buffer target; a trade of latency for stalls */
 /* Room for the longest status text swapp_audio_status_text can produce. */
 #define SWAPP_AUDIO_STATUS_MAX 192
 #define SWAPP_AUDIO_SILENT_MS 3000 /* server: connected client, no datagram for this long */
@@ -32,6 +32,10 @@ void swapp_audio_stop(int remove_device);
 /* Nonzero while the relay is working (client capturing and sending, server
  * receiving and playing); drives the row icon, check versus spinner. */
 int swapp_audio_ok(void);
+
+/* Nonzero once the relay has failed for good (the server's UDP port is taken);
+ * the row shows an error rather than a spinner. The client has no such state. */
+int swapp_audio_failed(void);
 
 /* A one-line status for the UI, written into buf. */
 void swapp_audio_status_text(char *buf, size_t buf_size);

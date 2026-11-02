@@ -1199,6 +1199,8 @@ static void swapp_client_switch_all(int role) {
     }
 }
 
+static void swapp_main_update_spinner(void);
+
 static void swapp_tray_refresh_status(void) {
     int can_switch_all = swapp_client_can_switch_all();
     if (g_tray_windows_item) {
@@ -1269,6 +1271,9 @@ static void swapp_tray_refresh_status(void) {
     if (g_linux_all_button) {
         gtk_widget_set_sensitive(g_linux_all_button, can_switch_all);
     }
+
+    /* Arm or stop the spinner as the rows resolve, not only when the window opens. */
+    swapp_main_update_spinner();
 }
 
 static void swapp_main_on_refresh(GtkButton *button, gpointer user_data) {
@@ -1375,8 +1380,7 @@ static void swapp_show_main_window(void) {
         gtk_container_add(GTK_CONTAINER(frame), table);
         gtk_box_pack_start(GTK_BOX(box), frame, FALSE, FALSE, 0);
 
-        /* The status rows, with the refresh button to their right spanning
-         * both. */
+        /* The status rows, with the big buttons to their right. */
         GtkWidget *bottom = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
         GtkWidget *rows = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
         gtk_box_pack_start(GTK_BOX(bottom), rows, TRUE, TRUE, 0);
