@@ -39,7 +39,7 @@
 #define AUDCLNT_STREAMFLAGS_RATEADJUST 0x00100000
 #endif
 #define DRIFT_STEP_FRAMES 100 /* 1 s of 10 ms frames: how often the rate and the readout move */
-#define TARGET_FRAMES (SWAPP_AUDIO_TARGET_MS * SWAPP_AUDIO_RATE / 1000 / SWAPP_AUDIO_FRAME)
+#define MS_TO_FRAMES(ms) ((ms) * SWAPP_AUDIO_RATE / 1000 / SWAPP_AUDIO_FRAME)
 
 /* The Windows SDK headers only declare these MIDL-generated IDs, which
  * initguid.h does not reach, so whether they link under MSVC would depend on
@@ -85,9 +85,11 @@ static char g_output_name[96] = "";
 static int g_buffered_ms = -1; /* the drift controller's smoothed delay, -1 until it has one */
 static int g_no_drift = 0;     /* the device refused rate adjustment */
 
-/* About 80 KB: far too big for a thread stack, so it lives here. */
+/* About 80 KB: far too big for a thread stack, so it lives here. The
+ * lateness tracker sets its target, and shares its lock. */
 static CRITICAL_SECTION g_jitter_lock;
 static swapp_jitter g_jitter;
+static swapp_adapt g_adapt;
 
 /* Appends " · N ms buffered". The tray shows the status with SetWindowTextA, so
  * the dot goes through the ANSI code page like the device name does; a code
@@ -201,6 +203,19 @@ static void swapp_audio_udp_failed(void) {
     swapp_audio_refresh_status();
 }
 
+/* Milliseconds on the performance counter. Lateness is measured in single
+ * milliseconds, which GetTickCount64's 15.6 ms steps would swamp. Called only
+ * from the receive thread, so the frequency is cached without a race. */
+static int64_t swapp_audio_now_ms(void) {
+    static LARGE_INTEGER freq = {0};
+    LARGE_INTEGER now;
+    if (!freq.QuadPart) {
+        QueryPerformanceFrequency(&freq);
+    }
+    QueryPerformanceCounter(&now);
+    return now.QuadPart / freq.QuadPart * 1000 + now.QuadPart % freq.QuadPart * 1000 / freq.QuadPart;
+}
+
 static DWORD WINAPI swapp_audio_thread(LPVOID param) {
     (void)param;
 
@@ -244,8 +259,17 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
             swapp_audio_packet pkt;
             if (swapp_audio_packet_parse(buf, (size_t)n, &pkt)) {
                 last_accept = GetTickCount64();
+                int64_t now_ms = swapp_audio_now_ms();
                 EnterCriticalSection(&g_jitter_lock);
                 swapp_jitter_push(&g_jitter, pkt.stream_id, pkt.seq, pkt.payload, pkt.payload_len);
+                /* A probe carries no audio and no timing worth measuring. A
+                 * packet too late to play still counts: its lateness is
+                 * exactly what the target has to cover. */
+                if (pkt.payload_len > 0) {
+                    swapp_adapt_arrival(&g_adapt, pkt.stream_id, pkt.seq, now_ms);
+                    swapp_jitter_set_target(&g_jitter,
+                                            MS_TO_FRAMES(swapp_adapt_target_ms(&g_adapt, now_ms)));
+                }
                 LeaveCriticalSection(&g_jitter_lock);
             }
         }
@@ -383,6 +407,7 @@ static int swapp_output_decode(swapp_output *o, float *pcm, UINT32 padding) {
     int depth = swapp_jitter_depth(&g_jitter);
     swapp_jitter_result result = swapp_jitter_pop(&g_jitter, payload, &len);
     uint32_t stream = swapp_jitter_stream(&g_jitter);
+    int target_frames = g_jitter.target_frames;
     LeaveCriticalSection(&g_jitter_lock);
 
     if (result == SWAPP_JITTER_SILENCE || stream != o->stream) {
@@ -390,8 +415,12 @@ static int swapp_output_decode(swapp_output *o, float *pcm, UINT32 padding) {
     } else {
         /* Frames still in the jitter buffer plus what the device holds. */
         double fill_ms = depth * 10.0 + padding * 1000.0 / SWAPP_AUDIO_RATE;
-        /* The jitter target plus the device buffer that is actually held. */
-        double target_ms = SWAPP_AUDIO_TARGET_MS + o->buffer_frames * 1000.0 / SWAPP_AUDIO_RATE;
+        /* The jitter target plus the device buffer that is actually held. As
+         * the target follows the measured lateness, this follows it too: a
+         * lower target is reached by playing slightly fast, never by
+         * dropping audio. */
+        double target_ms = target_frames * SWAPP_AUDIO_FRAME * 1000.0 / SWAPP_AUDIO_RATE
+                           + o->buffer_frames * 1000.0 / SWAPP_AUDIO_RATE;
         double ratio = swapp_drift_update(&o->drift, fill_ms, target_ms);
         if (++o->frames >= DRIFT_STEP_FRAMES) {
             o->frames = 0;
@@ -587,9 +616,10 @@ static int swapp_output_open(swapp_output *o, char *name, size_t name_size) {
     }
     if (SUCCEEDED(hr)) {
         /* Whatever piled up while there was no stream would otherwise stay
-         * as added latency for good: start again from the target. */
+         * as added latency for good: start again from the target, which the
+         * lateness measured so far still holds. */
         EnterCriticalSection(&g_jitter_lock);
-        swapp_jitter_init(&g_jitter, TARGET_FRAMES);
+        swapp_jitter_init(&g_jitter, g_jitter.target_frames);
         LeaveCriticalSection(&g_jitter_lock);
         /* Filled before Start, so the device does not begin on an empty
          * buffer. */
@@ -702,7 +732,8 @@ void swapp_audio_start(void) {
         InitializeCriticalSection(&g_jitter_lock);
         g_locks_ready = 1;
     }
-    swapp_jitter_init(&g_jitter, TARGET_FRAMES);
+    swapp_jitter_init(&g_jitter, MS_TO_FRAMES(SWAPP_AUDIO_TARGET_START_MS));
+    swapp_adapt_reset(&g_adapt);
     InterlockedExchange(&g_stop, 0);
     g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     g_change_event = CreateEventW(NULL, FALSE, FALSE, NULL);

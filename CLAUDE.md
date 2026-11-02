@@ -90,7 +90,12 @@ already carries the sink volume (applying it again was caught in testing). The
 sink is kept across update handovers, so music never falls back to the laptop
 speakers. The server steers its playback rate (WASAPI rate adjustment) to hold
 the buffered delay steady, since the two machines' clocks drift apart over
-hours.
+hours. The delay it holds is sized from the worst lateness of the last 60 s
+rather than fixed, because any fixed value was either too short for WiFi
+stalls or wasted delay on a calm link; an empty slot with nothing behind it
+is a stall and keeps its place, so the late packet still plays and the stall
+grows the buffer, while one with a later packet behind it is a loss and is
+skipped.
 
 The client does nothing without the server -- it holds no state of its own --
 but the server is whole on its own. It scans at startup, keeps the cache and

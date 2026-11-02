@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "audio.h"
+
 /* Every comparison goes through a signed difference so sequence wrap-around is harmless. */
 static int32_t seq_diff(uint32_t a, uint32_t b) { return (int32_t)(a - b); }
 
@@ -20,7 +22,11 @@ void swapp_jitter_init(swapp_jitter *j, int target_frames) {
     j->priming = 1;
     j->lost_run = 0;
     j->target_frames = target_frames;
+    j->late = 0;
+    j->lost = 0;
 }
+
+void swapp_jitter_set_target(swapp_jitter *j, int target_frames) { j->target_frames = target_frames; }
 
 int swapp_jitter_depth(const swapp_jitter *j) {
     int depth = 0;
@@ -45,7 +51,9 @@ void swapp_jitter_push(swapp_jitter *j, uint32_t stream_id, uint32_t seq, const 
         j->has_stream = 1;
         reset_to(j, seq);
     } else if (seq_diff(seq, j->next_seq) < 0) {
-        return; /* too late: its slot has already been played or declared lost */
+        /* Too late: its slot has already been played or declared lost. */
+        j->late++;
+        return;
     } else if (seq_diff(seq, j->next_seq) >= SWAPP_JITTER_SLOTS) {
         reset_to(j, seq);
     }
@@ -86,7 +94,17 @@ swapp_jitter_result swapp_jitter_pop(swapp_jitter *j, uint8_t *out, size_t *out_
         return SWAPP_JITTER_PACKET;
     }
 
-    j->next_seq++;
+    /* An empty slot is either a loss or a stall. A later packet already held
+     * means this one went missing: conceal it and move on. Nothing held means
+     * the network is stalled and this packet is still coming: conceal the
+     * frame but keep the slot, so the packet plays when it arrives and the
+     * stall grows the buffer instead of dropping audio. */
+    if (swapp_jitter_depth(j) > 0) {
+        j->next_seq++;
+        j->lost++;
+    } else {
+        j->late++;
+    }
     if (++j->lost_run >= SWAPP_JITTER_MAX_LOST) {
         /* Nothing for 200 ms: stop concealing and wait for the stream to refill. */
         j->priming = 1;
@@ -94,6 +112,59 @@ swapp_jitter_result swapp_jitter_pop(swapp_jitter *j, uint8_t *out, size_t *out_
         return SWAPP_JITTER_SILENCE;
     }
     return SWAPP_JITTER_LOST;
+}
+
+void swapp_adapt_reset(swapp_adapt *a) {
+    a->has_stream = 0;
+    a->stream_id = 0;
+    a->base_seq = 0;
+    a->first_ms = 0;
+    for (int i = 0; i < SWAPP_ADAPT_SECONDS; i++) a->second[i] = -1;
+}
+
+void swapp_adapt_arrival(swapp_adapt *a, uint32_t stream_id, uint32_t seq, int64_t now_ms) {
+    int64_t d, second;
+    int i;
+    if (!a->has_stream || stream_id != a->stream_id) {
+        /* A new sender's timing says nothing about the old one's. */
+        swapp_adapt_reset(a);
+        a->has_stream = 1;
+        a->stream_id = stream_id;
+        a->base_seq = seq;
+        a->first_ms = now_ms;
+    }
+    d = now_ms - (int64_t)seq_diff(seq, a->base_seq) * 10;
+    second = now_ms / 1000;
+    i = (int)(second % SWAPP_ADAPT_SECONDS);
+    if (a->second[i] != second) {
+        a->second[i] = second;
+        a->min_d[i] = d;
+        a->max_d[i] = d;
+    } else {
+        if (d < a->min_d[i]) a->min_d[i] = d;
+        if (d > a->max_d[i]) a->max_d[i] = d;
+    }
+}
+
+int swapp_adapt_target_ms(const swapp_adapt *a, int64_t now_ms) {
+    int64_t second = now_ms / 1000, lo = 0, hi = 0, target;
+    int any = 0;
+    if (!a->has_stream || now_ms - a->first_ms < 1000) return SWAPP_AUDIO_TARGET_START_MS;
+    for (int i = 0; i < SWAPP_ADAPT_SECONDS; i++) {
+        if (a->second[i] < 0 || a->second[i] > second || second - a->second[i] >= SWAPP_ADAPT_SECONDS)
+            continue;
+        if (!any || a->min_d[i] < lo) lo = a->min_d[i];
+        if (!any || a->max_d[i] > hi) hi = a->max_d[i];
+        any = 1;
+    }
+    if (!any) return SWAPP_AUDIO_TARGET_START_MS;
+    /* The spread is how much later than its earliest the latest packet came:
+     * a buffer that deep would have played every one of them. */
+    target = hi - lo + SWAPP_ADAPT_MARGIN_MS;
+    target = (target + 9) / 10 * 10;
+    if (target < SWAPP_AUDIO_TARGET_MIN_MS) target = SWAPP_AUDIO_TARGET_MIN_MS;
+    if (target > SWAPP_AUDIO_TARGET_MAX_MS) target = SWAPP_AUDIO_TARGET_MAX_MS;
+    return (int)target;
 }
 
 void swapp_drift_reset(swapp_drift *d) {

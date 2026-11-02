@@ -16,7 +16,13 @@
 #define SWAPP_AUDIO_CHANNELS 2
 #define SWAPP_AUDIO_BITRATE 256000
 #define SWAPP_AUDIO_FRAME 480      /* samples per channel per datagram: 10 ms */
-#define SWAPP_AUDIO_TARGET_MS 120  /* jitter-buffer target: WiFi stalls up to this long play cleanly */
+/* The jitter-buffer target follows the measured lateness (swapp_adapt in
+ * audio_jitter.h) within these bounds; the device buffer, about 47 ms, comes
+ * on top, so the whole delay stays near 200 ms at most. START holds until a
+ * second of the stream has been measured. */
+#define SWAPP_AUDIO_TARGET_MIN_MS 20
+#define SWAPP_AUDIO_TARGET_MAX_MS 150
+#define SWAPP_AUDIO_TARGET_START_MS 100
 /* Room for the longest status text swapp_audio_status_text can produce. */
 #define SWAPP_AUDIO_STATUS_MAX 192
 #define SWAPP_AUDIO_SILENT_MS 3000 /* server: connected client, no datagram for this long */
