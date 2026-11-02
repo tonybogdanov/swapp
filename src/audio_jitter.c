@@ -63,7 +63,15 @@ swapp_jitter_result swapp_jitter_pop(swapp_jitter *j, uint8_t *out, size_t *out_
     *out_len = 0;
 
     if (j->priming) {
-        if (swapp_jitter_depth(j) < j->target_frames) return SWAPP_JITTER_SILENCE;
+        int depth = swapp_jitter_depth(j);
+        if (depth < j->target_frames) return SWAPP_JITTER_SILENCE;
+        /* A WiFi stall long enough to re-prime ends with its whole backlog
+         * arriving at once. Playing all of it would add that much delay, which
+         * drift control can only shed at 0.5% (80 s for 400 ms), so a backlog
+         * past twice the target starts at the target depth and drops the older
+         * frames. A smaller excess is kept: drift control sheds it in seconds,
+         * and dropping audio is audible. */
+        if (depth > 2 * j->target_frames) j->next_seq += (uint32_t)(depth - j->target_frames);
         j->priming = 0;
         j->lost_run = 0;
     }

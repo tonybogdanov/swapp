@@ -100,8 +100,8 @@ static void test_jitter_primes(void) {
 static void test_jitter_in_order(void) {
     int b = -1;
     swapp_jitter_init(&jit, 4);
-    for (uint32_t i = 0; i < 10; i++) jpush(&jit, 1, i);
-    for (int i = 0; i < 10; i++) {
+    for (uint32_t i = 0; i < 8; i++) jpush(&jit, 1, i);
+    for (int i = 0; i < 8; i++) {
         EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
         EXPECT(b == i);
     }
@@ -195,6 +195,29 @@ static void test_jitter_burst_after_gap(void) {
     }
 }
 
+static void test_jitter_backlog_trimmed_on_prime(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 4);
+    for (uint32_t i = 0; i < 40; i++) jpush(&jit, 1, i);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(b == 36);
+    EXPECT(swapp_jitter_depth(&jit) == 3);
+}
+
+static void test_jitter_backlog_trimmed_on_reprime(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 4);
+    jprime(&jit, 0);
+    for (int i = 0; i < 4; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    for (int i = 0; i < SWAPP_JITTER_MAX_LOST - 1; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_SILENCE);
+    /* The stall's backlog arrives at once: 40 frames past the read point. */
+    for (uint32_t i = 24; i < 64; i++) jpush(&jit, 1, i);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(b == 60);
+    EXPECT(swapp_jitter_depth(&jit) == 3);
+}
+
 static void test_jitter_probe_ignored(void) {
     uint8_t b = 0;
     swapp_jitter_init(&jit, 4);
@@ -277,6 +300,8 @@ int main(void) {
     test_jitter_far_jump_resyncs();
     test_jitter_reprimes_after_gap();
     test_jitter_burst_after_gap();
+    test_jitter_backlog_trimmed_on_prime();
+    test_jitter_backlog_trimmed_on_reprime();
     test_jitter_probe_ignored();
     test_jitter_seq_wraps();
     test_drift_at_target();
