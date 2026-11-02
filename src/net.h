@@ -2,6 +2,7 @@
 #define SWAPP_NET_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* The link between the two halves of Swapp: the Windows server, which owns
  * the monitors, and the Linux client, which drives it. See CLAUDE.md for
@@ -84,6 +85,11 @@ swapp_net_state swapp_net_get_state(void);
  * 192.168.1.10", "Searching for server...", "Port 21423 already in use"),
  * written into buf. */
 void swapp_net_status_text(char *buf, size_t buf_size);
+
+/* Nonzero while connected. peer_be: the other side's IPv4 address; self_be: this
+ * side's address on the same connection (getsockname of the TCP socket). Both in
+ * network byte order. Safe from any thread. */
+int swapp_net_peer(uint32_t *peer_be, uint32_t *self_be);
 
 /* Registers a function called whenever the state changes, so the tray can
  * refresh. Invoked on the UI thread, not the socket thread. */

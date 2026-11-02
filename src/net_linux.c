@@ -37,6 +37,13 @@ static int g_monitors_ready = 0;
  * with no connection. Writes from both threads go through g_send_lock so a
  * request can't splice into a pong. */
 static int g_sock = -1;
+
+/* The connection's two IPv4 addresses, for the audio relay, which sends UDP
+ * to the peer from this side's address on the same LAN. Valid only while
+ * g_addrs_valid; guarded by g_state_lock. */
+static uint32_t g_peer_be = 0;
+static uint32_t g_self_be = 0;
+static int g_addrs_valid = 0;
 static GMutex g_send_lock;
 
 static int swapp_net_send_line(int sock, const char *line) {
@@ -405,6 +412,15 @@ static int swapp_net_handle_line(int sock, const char *line, GString *block) {
 static void swapp_net_serve(int sock, const char *addr) {
     g_mutex_lock(&g_state_lock);
     g_sock = sock;
+    struct sockaddr_in peer_sa, self_sa;
+    socklen_t peer_len = sizeof peer_sa, self_len = sizeof self_sa;
+    if (getpeername(sock, (struct sockaddr *)&peer_sa, &peer_len) == 0 &&
+        getsockname(sock, (struct sockaddr *)&self_sa, &self_len) == 0 &&
+        peer_sa.sin_family == AF_INET && self_sa.sin_family == AF_INET) {
+        g_peer_be = peer_sa.sin_addr.s_addr;
+        g_self_be = self_sa.sin_addr.s_addr;
+        g_addrs_valid = 1;
+    }
     g_mutex_unlock(&g_state_lock);
     swapp_net_set_state(SWAPP_NET_CONNECTED, addr);
 
@@ -458,6 +474,7 @@ static void swapp_net_serve(int sock, const char *addr) {
     g_string_free(block, TRUE);
     g_mutex_lock(&g_state_lock);
     g_sock = -1;
+    g_addrs_valid = 0;
     g_mutex_unlock(&g_state_lock);
     close(sock);
 
@@ -496,6 +513,17 @@ void swapp_net_start(void) {
 
 void swapp_net_stop(void) {
     g_stop = 1;
+}
+
+int swapp_net_peer(uint32_t *peer_be, uint32_t *self_be) {
+    g_mutex_lock(&g_state_lock);
+    int valid = g_addrs_valid;
+    if (valid) {
+        *peer_be = g_peer_be;
+        *self_be = g_self_be;
+    }
+    g_mutex_unlock(&g_state_lock);
+    return valid;
 }
 
 swapp_net_state swapp_net_get_state(void) {

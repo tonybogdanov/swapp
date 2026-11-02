@@ -32,6 +32,13 @@ static void (*g_switch_all_callback)(int) = NULL;
  * back around. Guarded by the same lock as the state: both threads send on
  * it, and interleaved writes would splice two messages into nonsense. */
 static SOCKET g_client = INVALID_SOCKET;
+
+/* The connection's two IPv4 addresses, for the audio relay, which accepts
+ * UDP only from the peer and replies on this side's address. Valid only
+ * while g_addrs_valid; guarded by g_state_lock. */
+static uint32_t g_peer_be = 0;
+static uint32_t g_self_be = 0;
+static int g_addrs_valid = 0;
 static CRITICAL_SECTION g_send_lock;
 
 /* Sends one whole line. Callers hold g_send_lock. */
@@ -93,6 +100,18 @@ static void swapp_net_serve(SOCKET listener, SOCKET client, const char *peer) {
     EnterCriticalSection(&g_send_lock);
     g_client = client;
     LeaveCriticalSection(&g_send_lock);
+
+    struct sockaddr_in peer_sa, self_sa;
+    int peer_len = sizeof peer_sa, self_len = sizeof self_sa;
+    if (getpeername(client, (struct sockaddr *)&peer_sa, &peer_len) == 0 &&
+        getsockname(client, (struct sockaddr *)&self_sa, &self_len) == 0 &&
+        peer_sa.sin_family == AF_INET && self_sa.sin_family == AF_INET) {
+        EnterCriticalSection(&g_state_lock);
+        g_peer_be = peer_sa.sin_addr.s_addr;
+        g_self_be = self_sa.sin_addr.s_addr;
+        g_addrs_valid = 1;
+        LeaveCriticalSection(&g_state_lock);
+    }
 
     swapp_net_set_state(SWAPP_NET_CONNECTED, peer);
 
@@ -213,6 +232,10 @@ static void swapp_net_serve(SOCKET listener, SOCKET client, const char *peer) {
     EnterCriticalSection(&g_send_lock);
     g_client = INVALID_SOCKET;
     LeaveCriticalSection(&g_send_lock);
+
+    EnterCriticalSection(&g_state_lock);
+    g_addrs_valid = 0;
+    LeaveCriticalSection(&g_state_lock);
 
     closesocket(client);
 }
@@ -338,6 +361,17 @@ void swapp_net_start(void) {
 
 void swapp_net_stop(void) {
     InterlockedExchange(&g_stop, 1);
+}
+
+int swapp_net_peer(uint32_t *peer_be, uint32_t *self_be) {
+    EnterCriticalSection(&g_state_lock);
+    int valid = g_addrs_valid;
+    if (valid) {
+        *peer_be = g_peer_be;
+        *self_be = g_self_be;
+    }
+    LeaveCriticalSection(&g_state_lock);
+    return valid;
 }
 
 swapp_net_state swapp_net_get_state(void) {
