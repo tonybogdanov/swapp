@@ -87,3 +87,25 @@ swapp_jitter_result swapp_jitter_pop(swapp_jitter *j, uint8_t *out, size_t *out_
     }
     return SWAPP_JITTER_LOST;
 }
+
+void swapp_drift_reset(swapp_drift *d) {
+    d->smoothed_ms = 0;
+    d->primed = 0;
+}
+
+double swapp_drift_update(swapp_drift *d, double fill_ms, double target_ms) {
+    double adjust;
+    if (!d->primed) {
+        d->smoothed_ms = fill_ms;
+        d->primed = 1;
+    } else {
+        /* About a 1 s time constant at 100 calls a second, so a burst or a
+         * stall in the network does not turn into an audible pitch bend. */
+        d->smoothed_ms += 0.01 * (fill_ms - d->smoothed_ms);
+    }
+    /* 10 ms of error is 0.1% (about 1.7 cents); never more than 0.5%. */
+    adjust = (d->smoothed_ms - target_ms) * 0.0001;
+    if (adjust > 0.005) adjust = 0.005;
+    if (adjust < -0.005) adjust = -0.005;
+    return 1.0 + adjust;
+}

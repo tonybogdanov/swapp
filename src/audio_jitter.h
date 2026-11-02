@@ -33,3 +33,15 @@ swapp_jitter_result swapp_jitter_pop(swapp_jitter *j, uint8_t *out, size_t *out_
 int swapp_jitter_depth(const swapp_jitter *j);
 /* Changes when a new sender appears, so the caller knows to reset its decoder. */
 uint32_t swapp_jitter_stream(const swapp_jitter *j);
+
+/* Holds the delay the relay buffers steady by nudging the playback rate: the
+ * two machines' clocks differ by a few parts per million, so without it the
+ * buffer slowly drains or grows over hours. */
+typedef struct {
+    double smoothed_ms;
+    int primed;
+} swapp_drift;
+
+void swapp_drift_reset(swapp_drift *d);
+/* Playback-rate ratio, called once per 10 ms frame with the buffered delay in ms. */
+double swapp_drift_update(swapp_drift *d, double fill_ms, double target_ms);

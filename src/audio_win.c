@@ -35,6 +35,10 @@
 #define REOPEN_PAUSE_MS 100  /* after a stream failure, so a broken device cannot spin us */
 #define RENDER_WAIT_MS 1000  /* a device that stops signalling is noticed by polling it */
 #define BUFFER_HNS 200000    /* 20 ms, in 100 ns units */
+#ifndef AUDCLNT_STREAMFLAGS_RATEADJUST
+#define AUDCLNT_STREAMFLAGS_RATEADJUST 0x00100000
+#endif
+#define DRIFT_STEP_FRAMES 100 /* 1 s of 10 ms frames: how often the rate and the readout move */
 #define TARGET_FRAMES (SWAPP_AUDIO_TARGET_MS * SWAPP_AUDIO_RATE / 1000 / SWAPP_AUDIO_FRAME)
 
 /* The Windows SDK headers only declare these MIDL-generated IDs, which
@@ -49,6 +53,8 @@ static const GUID swapp_iid_notification = {
     0x7991eec9, 0x7e89, 0x4d85, {0x83, 0x90, 0x6c, 0x70, 0x3c, 0xec, 0x60, 0xc0}};
 static const GUID swapp_iid_audio_client = {
     0x1cb9ad4c, 0xdbfa, 0x4c32, {0xb1, 0x78, 0xc2, 0xf5, 0x68, 0xa7, 0x03, 0xb2}};
+static const GUID swapp_iid_clock_adjustment = {
+    0xf6e4c0a0, 0x46d9, 0x4fb8, {0xbe, 0x21, 0x57, 0xa3, 0xef, 0x2b, 0x62, 0x6c}};
 static const GUID swapp_iid_render_client = {
     0xf294acfc, 0x3146, 0x4483, {0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2}};
 static const GUID swapp_iid_unknown = {
@@ -66,7 +72,7 @@ static HANDLE g_stop_event = NULL;
 static HANDLE g_change_event = NULL;
 static volatile LONG g_stop = 0;
 static int g_ok = 0;
-static char g_text[128] = "Audio: waiting for the client";
+static char g_text[192] = "Audio: waiting for the client";
 static void (*g_state_callback)(void) = NULL;
 
 /* What each thread reports, combined into the status text. */
@@ -76,10 +82,22 @@ static uint32_t g_peer_be = 0;
 static ULONGLONG g_last_accept = 0; /* 0: nothing accepted from the current client yet */
 static swapp_output_state g_output = OUTPUT_PENDING;
 static char g_output_name[96] = "";
+static int g_buffered_ms = -1; /* the drift controller's smoothed delay, -1 until it has one */
+static int g_no_drift = 0;     /* the device refused rate adjustment */
 
 /* About 80 KB: far too big for a thread stack, so it lives here. */
 static CRITICAL_SECTION g_jitter_lock;
 static swapp_jitter g_jitter;
+
+/* Appends " · N ms buffered". The tray shows the status with SetWindowTextA, so
+ * the dot goes through the ANSI code page like the device name does; a code
+ * page without it gets a plain hyphen. */
+static void swapp_audio_append_buffered(char *text, size_t size, size_t at, int ms) {
+    char sep[16] = " - ";
+    WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, L" \u00b7 ", -1, sep, (int)sizeof sep, NULL,
+                        NULL);
+    _snprintf_s(text + at, size - at, _TRUNCATE, "%s%d ms buffered", sep, ms);
+}
 
 /* Rebuilds the status from both threads' state, and runs the callback only
  * when the text changed. Built and stored under one lock, so two threads
@@ -103,7 +121,13 @@ static void swapp_audio_refresh_status(void) {
         if (g_last_accept != 0 && GetTickCount64() - g_last_accept < SWAPP_AUDIO_SILENT_MS) {
             ok = 1;
             if (g_output == OUTPUT_OPEN) {
-                snprintf(text, sizeof text, "Audio: playing on %s", g_output_name);
+                size_t n = (size_t)snprintf(text, sizeof text, "Audio: playing on %s", g_output_name);
+                if (g_buffered_ms >= 0 && n < sizeof text) {
+                    swapp_audio_append_buffered(text, sizeof text, n, g_buffered_ms);
+                }
+                if (g_no_drift && strlen(text) + 20 < sizeof text) {
+                    strcat(text, " (no drift control)");
+                }
             } else {
                 snprintf(text, sizeof text, "Audio: receiving from %s", ip);
             }
@@ -120,6 +144,14 @@ static void swapp_audio_refresh_status(void) {
     if (changed && g_state_callback) {
         g_state_callback();
     }
+}
+
+static void swapp_audio_set_drift_status(int buffered_ms, int no_drift) {
+    EnterCriticalSection(&g_lock);
+    g_buffered_ms = buffered_ms;
+    g_no_drift = no_drift;
+    LeaveCriticalSection(&g_lock);
+    swapp_audio_refresh_status();
 }
 
 static void swapp_audio_set_output(swapp_output_state state, const char *name) {
@@ -297,21 +329,58 @@ typedef struct {
     IMMDevice *device;
     IAudioClient *client;
     IAudioRenderClient *render;
+    IAudioClockAdjustment *adjust; /* NULL when the stream has no rate adjustment */
     HANDLE event;
     UINT32 buffer_frames;
     OpusDecoder *decoder;
     uint32_t stream; /* the jitter buffer's stream the decoder last saw */
+    swapp_drift drift;
+    int frames;       /* popped since the drift last moved the rate */
+    int rate_nudged;  /* the device is not at the nominal rate */
 } swapp_output;
+
+/* Back to the nominal rate and an empty history, for when the buffer is
+ * refilling or a new sender starts: the old delay says nothing about it. */
+static void swapp_output_drift_reset(swapp_output *o) {
+    int was_shown = o->drift.primed;
+    swapp_drift_reset(&o->drift);
+    o->frames = 0;
+    if (o->adjust && o->rate_nudged) {
+        IAudioClockAdjustment_SetSampleRate(o->adjust, (float)SWAPP_AUDIO_RATE);
+    }
+    o->rate_nudged = 0;
+    if (was_shown) {
+        swapp_audio_set_drift_status(-1, 0);
+    }
+}
 
 /* Decodes the next 10 ms into pcm. Returns 0 when there is nothing to play,
  * and the caller writes silence instead. */
-static int swapp_output_decode(swapp_output *o, float *pcm) {
+static int swapp_output_decode(swapp_output *o, float *pcm, UINT32 padding) {
     uint8_t payload[SWAPP_AUDIO_MAX_PAYLOAD];
     size_t len = 0;
     EnterCriticalSection(&g_jitter_lock);
+    int depth = swapp_jitter_depth(&g_jitter);
     swapp_jitter_result result = swapp_jitter_pop(&g_jitter, payload, &len);
     uint32_t stream = swapp_jitter_stream(&g_jitter);
     LeaveCriticalSection(&g_jitter_lock);
+
+    if (result == SWAPP_JITTER_SILENCE || stream != o->stream) {
+        swapp_output_drift_reset(o);
+    } else {
+        /* Frames still in the jitter buffer plus what the device holds. */
+        double fill_ms = depth * 10.0 + padding * 1000.0 / SWAPP_AUDIO_RATE;
+        double ratio = swapp_drift_update(&o->drift, fill_ms, SWAPP_AUDIO_TARGET_MS + 20);
+        if (++o->frames >= DRIFT_STEP_FRAMES) {
+            o->frames = 0;
+            if (o->adjust &&
+                SUCCEEDED(IAudioClockAdjustment_SetSampleRate(o->adjust,
+                                                              (float)(SWAPP_AUDIO_RATE * ratio)))) {
+                o->rate_nudged = 1;
+            }
+            swapp_audio_set_drift_status((int)(o->drift.smoothed_ms + 0.5), o->adjust == NULL);
+        }
+    }
 
     if (!o->decoder) {
         return 0;
@@ -346,7 +415,7 @@ static HRESULT swapp_output_feed(swapp_output *o) {
         if (FAILED(hr)) {
             return hr;
         }
-        int ok = swapp_output_decode(o, (float *)data);
+        int ok = swapp_output_decode(o, (float *)data, padding);
         hr = IAudioRenderClient_ReleaseBuffer(o->render, SWAPP_AUDIO_FRAME,
                                               ok ? 0 : AUDCLNT_BUFFERFLAGS_SILENT);
         if (FAILED(hr)) {
@@ -366,6 +435,10 @@ static void swapp_output_close(swapp_output *o) {
     if (o->render) {
         IAudioRenderClient_Release(o->render);
         o->render = NULL;
+    }
+    if (o->adjust) {
+        IAudioClockAdjustment_Release(o->adjust);
+        o->adjust = NULL;
     }
     if (o->client) {
         IAudioClient_Release(o->client);
@@ -418,14 +491,6 @@ static int swapp_output_open(swapp_output *o, char *name, size_t name_size) {
     }
     swapp_output_name(o->device, name, name_size);
 
-    hr = IMMDevice_Activate(o->device, &swapp_iid_audio_client, CLSCTX_ALL, NULL,
-                            (void **)&o->client);
-    if (FAILED(hr)) {
-        o->client = NULL;
-        swapp_output_close(o);
-        return 0;
-    }
-
     /* Exactly what the decoder produces; the shared-mode engine converts it
      * to whatever the device mixes in, so the device's format never
      * matters here. */
@@ -441,11 +506,44 @@ static int swapp_output_open(swapp_output *o, char *name, size_t name_size) {
     format.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
     format.SubFormat = swapp_subtype_float;
 
-    hr = IAudioClient_Initialize(o->client, AUDCLNT_SHAREMODE_SHARED,
-                                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-                                     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-                                     AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                                 BUFFER_HNS, 0, &format.Format, NULL);
+    /* Rate adjustment is what holds the delay steady; a device that refuses it
+     * still plays, just without drift control. A client that failed to
+     * initialize is not reusable, so the retry activates a fresh one. */
+    int no_drift = 0;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                      AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+        if (attempt == 0) {
+            flags |= AUDCLNT_STREAMFLAGS_RATEADJUST;
+        } else {
+            no_drift = 1;
+        }
+        hr = IMMDevice_Activate(o->device, &swapp_iid_audio_client, CLSCTX_ALL, NULL,
+                                (void **)&o->client);
+        if (FAILED(hr)) {
+            o->client = NULL;
+            swapp_output_close(o);
+            return 0;
+        }
+        hr = IAudioClient_Initialize(o->client, AUDCLNT_SHAREMODE_SHARED, flags, BUFFER_HNS, 0,
+                                     &format.Format, NULL);
+        if (SUCCEEDED(hr) || attempt == 1) {
+            break;
+        }
+        IAudioClient_Release(o->client);
+        o->client = NULL;
+    }
+    if (SUCCEEDED(hr) && !no_drift) {
+        if (FAILED(IAudioClient_GetService(o->client, &swapp_iid_clock_adjustment,
+                                           (void **)&o->adjust))) {
+            o->adjust = NULL;
+            no_drift = 1;
+        }
+    }
+    if (SUCCEEDED(hr)) {
+        swapp_output_drift_reset(o);
+        swapp_audio_set_drift_status(-1, no_drift);
+    }
     if (SUCCEEDED(hr)) {
         hr = IAudioClient_SetEventHandle(o->client, o->event);
     }

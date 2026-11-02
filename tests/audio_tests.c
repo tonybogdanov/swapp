@@ -216,6 +216,47 @@ static void test_jitter_seq_wraps(void) {
     }
 }
 
+static double run_drift(swapp_drift *d, int n, double fill, double target) {
+    double r = 1.0;
+    for (int i = 0; i < n; i++) r = swapp_drift_update(d, fill, target);
+    return r;
+}
+
+static void test_drift_at_target(void) {
+    swapp_drift d;
+    swapp_drift_reset(&d);
+    EXPECT(run_drift(&d, 500, 40, 40) == 1.0);
+}
+
+static void test_drift_too_full_speeds(void) {
+    swapp_drift d;
+    double r;
+    swapp_drift_reset(&d);
+    r = run_drift(&d, 500, 60, 40);
+    EXPECT(r > 1.0019 && r < 1.0021);
+}
+
+static void test_drift_too_empty_slows(void) {
+    swapp_drift d;
+    double r;
+    swapp_drift_reset(&d);
+    r = run_drift(&d, 500, 20, 40);
+    EXPECT(r < 0.9981 && r > 0.9979);
+}
+
+static void test_drift_clamped(void) {
+    swapp_drift d;
+    swapp_drift_reset(&d);
+    EXPECT(run_drift(&d, 500, 1000, 40) == 1.005);
+}
+
+static void test_drift_spike_smoothed(void) {
+    swapp_drift d;
+    swapp_drift_reset(&d);
+    run_drift(&d, 200, 40, 40);
+    EXPECT(swapp_drift_update(&d, 140, 40) < 1.0002);
+}
+
 int main(void) {
     test_jitter_primes();
     test_jitter_in_order();
@@ -229,6 +270,11 @@ int main(void) {
     test_jitter_burst_after_gap();
     test_jitter_probe_ignored();
     test_jitter_seq_wraps();
+    test_drift_at_target();
+    test_drift_too_full_speeds();
+    test_drift_too_empty_slows();
+    test_drift_clamped();
+    test_drift_spike_smoothed();
     test_packet_roundtrip();
     test_packet_wire_bytes();
     test_packet_probe();

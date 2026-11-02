@@ -78,6 +78,16 @@ with `err busy` rather than queued.
 Each side shows the link state in its tray (hover text, and a greyed readout
 at the top of the menu).
 
+Audio is relayed over UDP on the same port number, client to server only: a
+WiFi retransmit stall on TCP would delay every later frame, and `nc` stays a
+working debugging client. The server trusts datagrams only from the connected
+client's IP. The client applies no gain, because the null sink's monitor
+already carries the sink volume (applying it again was caught in testing). The
+sink is kept across update handovers, so music never falls back to the laptop
+speakers. The server steers its playback rate (WASAPI rate adjustment) to hold
+the buffered delay steady, since the two machines' clocks drift apart over
+hours.
+
 The client does nothing without the server -- it holds no state of its own --
 but the server is whole on its own. It scans at startup, keeps the cache and
 serves its own buttons with no client ever connecting; a client arriving is
