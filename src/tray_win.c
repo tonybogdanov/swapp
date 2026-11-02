@@ -826,7 +826,9 @@ static void swapp_row_create(swapp_row *row, HWND parent, int top, int width) {
     SetWindowLongPtrA(row->icon, GWLP_USERDATA, (LONG_PTR)row);
 
     int label_left = margin + size + swapp_dpi_scale(8);
-    row->label = CreateWindowExA(0, "STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT,
+    /* SS_NOTIFY: a plain static is transparent to the mouse, so a tooltip
+     * on it would never see it hover. */
+    row->label = CreateWindowExA(0, "STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOTIFY,
                                  label_left, top + swapp_dpi_scale(2),
                                  width - label_left - margin, size,
                                  parent, NULL, instance, NULL);
@@ -834,12 +836,9 @@ static void swapp_row_create(swapp_row *row, HWND parent, int top, int width) {
                  (WPARAM)(g_font ? g_font : GetStockObject(DEFAULT_GUI_FONT)), TRUE);
 }
 
-/* Gives a row a hover tooltip, empty until swapp_row_set_tip fills it; a
- * tooltip with no text never shows. */
+/* Gives a row a hover tooltip over both its icon and its text, empty until
+ * swapp_row_set_tip fills it; a tooltip with no text never shows. */
 static HWND swapp_row_add_tip(swapp_row *row, HWND parent) {
-    /* A plain static is transparent to the mouse, so the tooltip's subclass
-     * would never see it hover; SS_NOTIFY makes it hit-testable. */
-    SetWindowLongPtrA(row->label, GWL_STYLE, GetWindowLongPtrA(row->label, GWL_STYLE) | SS_NOTIFY);
     HWND tip = CreateWindowExA(WS_EX_TOPMOST, TOOLTIPS_CLASSA, NULL,
                                WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT,
                                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, parent, NULL,
@@ -847,13 +846,16 @@ static HWND swapp_row_add_tip(swapp_row *row, HWND parent) {
     if (!tip) {
         return NULL;
     }
-    TOOLINFOA ti = {0};
-    ti.cbSize = TTTOOLINFOA_V2_SIZE;
-    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-    ti.hwnd = parent;
-    ti.uId = (UINT_PTR)row->label;
-    ti.lpszText = "";
-    SendMessageA(tip, TTM_ADDTOOLA, 0, (LPARAM)&ti);
+    HWND tools[2] = {row->icon, row->label};
+    for (int i = 0; i < 2; i++) {
+        TOOLINFOA ti = {0};
+        ti.cbSize = TTTOOLINFOA_V2_SIZE;
+        ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        ti.hwnd = parent;
+        ti.uId = (UINT_PTR)tools[i];
+        ti.lpszText = "";
+        SendMessageA(tip, TTM_ADDTOOLA, 0, (LPARAM)&ti);
+    }
     /* A maximum width is what makes a tooltip break its text on CRLF. */
     SendMessageA(tip, TTM_SETMAXTIPWIDTH, 0, swapp_dpi_scale(400));
     /* Long enough to read three lines; the default is gone in five seconds. */
@@ -872,12 +874,15 @@ static void swapp_row_set_tip(swapp_row *row, HWND tip, char *shown, size_t show
         return;
     }
     strncpy_s(shown, shown_size, text, _TRUNCATE);
-    TOOLINFOA ti = {0};
-    ti.cbSize = TTTOOLINFOA_V2_SIZE;
-    ti.hwnd = GetParent(row->label);
-    ti.uId = (UINT_PTR)row->label;
-    ti.lpszText = shown;
-    SendMessageA(tip, TTM_UPDATETIPTEXTA, 0, (LPARAM)&ti);
+    HWND tools[2] = {row->icon, row->label};
+    for (int i = 0; i < 2; i++) {
+        TOOLINFOA ti = {0};
+        ti.cbSize = TTTOOLINFOA_V2_SIZE;
+        ti.hwnd = GetParent(row->label);
+        ti.uId = (UINT_PTR)tools[i];
+        ti.lpszText = shown;
+        SendMessageA(tip, TTM_UPDATETIPTEXTA, 0, (LPARAM)&ti);
+    }
 }
 
 /* The status refresh runs on every spinner tick; setting identical text

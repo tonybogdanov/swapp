@@ -138,26 +138,62 @@ static void test_jitter_stall_waits(void) {
     swapp_jitter_init(&jit, 4);
     jprime(&jit, 0);
     for (int i = 0; i < 4; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
-    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
-    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
-    EXPECT(jit.late == 2 && jit.lost == 0);
+    for (int i = 0; i < 5; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
+    /* Provisional until the run ends: it may yet be a pause. */
+    EXPECT(jit.late == 0 && jit.lost == 0);
     jpush(&jit, 1, 4);
     EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
     EXPECT(b == 4);
+    EXPECT(jit.late == 5 && jit.lost == 0);
 }
 
-/* A hole with a later packet behind it is a loss even after a stall. */
-static void test_jitter_hole_after_stall_is_lost(void) {
+/* A stall that runs into a re-prime is the sender pausing: nothing was late. */
+static void test_jitter_pause_not_late(void) {
     int b = -1;
     swapp_jitter_init(&jit, 4);
     jprime(&jit, 0);
     for (int i = 0; i < 4; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
-    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
-    jpush(&jit, 1, 5);
-    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
-    EXPECT(jit.late == 1 && jit.lost == 1);
+    for (int i = 0; i < SWAPP_JITTER_MAX_LOST - 1; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_SILENCE);
+    EXPECT(jit.late == 0 && jit.lost == 0);
+    /* The sender resumes where it stopped. */
+    for (uint32_t i = 4; i < 8; i++) jpush(&jit, 1, i);
     EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
-    EXPECT(b == 5);
+    EXPECT(b == 4);
+    EXPECT(jit.late == 0 && jit.lost == 0);
+}
+
+/* A hole found after a stall on it costs one concealment, not two: the
+ * stall's frame stood in for the lost packet, and the next one plays at once. */
+static void test_jitter_hole_after_stall_is_lost(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 2);
+    jpush(&jit, 1, 0);
+    jpush(&jit, 1, 1);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
+    jpush(&jit, 1, 3);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(b == 3);
+    EXPECT(jit.lost == 1 && jit.late == 0);
+}
+
+/* A longer stall before the hole showed: one frame stood in for the lost
+ * packet, the others delayed the next one, which was late. */
+static void test_jitter_long_stall_then_hole(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 2);
+    jpush(&jit, 1, 0);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_SILENCE);
+    jpush(&jit, 1, 1);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    for (int i = 0; i < 3; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
+    jpush(&jit, 1, 3);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(b == 3);
+    EXPECT(jit.lost == 1 && jit.late == 2);
 }
 
 static void test_jitter_target_settable(void) {
@@ -234,12 +270,12 @@ static void test_jitter_burst_after_gap(void) {
     jprime(&jit, 0);
     for (int i = 0; i < 4; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
     for (int i = 0; i < 4; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
-    EXPECT(jit.late == 4 && jit.lost == 0);
     for (uint32_t i = 4; i < 13; i++) jpush(&jit, 1, i);
     for (int i = 4; i < 13; i++) {
         EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
         EXPECT(b == i);
     }
+    EXPECT(jit.late == 4 && jit.lost == 0);
 }
 
 static void test_jitter_backlog_trimmed_on_prime(void) {
@@ -380,7 +416,7 @@ static void test_adapt_gap_resets(void) {
     t = afeed(1, &seq, 5000000, 5002000, 0);
     EXPECT(swapp_adapt_target_ms(&ad, t) == SWAPP_AUDIO_TARGET_MIN_MS);
     t += 2000;
-    swapp_adapt_arrival(&ad, 1, seq++, t);
+    EXPECT(swapp_adapt_arrival(&ad, 1, seq++, t) != 0);
     EXPECT(swapp_adapt_target_ms(&ad, t) == SWAPP_AUDIO_TARGET_START_MS);
     t = afeed(1, &seq, t + 10, t + 1010, 0);
     EXPECT(swapp_adapt_target_ms(&ad, t) == SWAPP_AUDIO_TARGET_MIN_MS);
@@ -393,7 +429,7 @@ static void test_adapt_short_gap_counts(void) {
     swapp_adapt_reset(&ad);
     t = afeed(1, &seq, 5000000, 5002000, 0);
     t += 300;
-    swapp_adapt_arrival(&ad, 1, seq++, t);
+    EXPECT(swapp_adapt_arrival(&ad, 1, seq++, t) == 0);
     EXPECT(swapp_adapt_target_ms(&ad, t) == SWAPP_AUDIO_TARGET_MAX_MS);
 }
 
@@ -453,7 +489,9 @@ int main(void) {
     test_jitter_reorders();
     test_jitter_loss_is_lost();
     test_jitter_stall_waits();
+    test_jitter_pause_not_late();
     test_jitter_hole_after_stall_is_lost();
+    test_jitter_long_stall_then_hole();
     test_jitter_target_settable();
     test_jitter_late_dropped();
     test_jitter_duplicate_ignored();

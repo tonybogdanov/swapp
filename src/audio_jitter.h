@@ -25,9 +25,13 @@ typedef struct {
     int priming;
     int lost_run;
     int target_frames;
-    /* Cumulative since init: frames concealed because their packet had not
-     * arrived yet, plus packets that arrived after their slot was played;
-     * and frames skipped because a later packet showed theirs was lost. */
+    /* Frames concealed so far while next_seq's packet is missing with nothing
+     * held past it. Provisional: whether they were late or the sender paused
+     * is only known when the run ends. */
+    uint32_t stall_run;
+    /* Cumulative since init: frames concealed because their packet came late,
+     * plus packets that arrived after their slot was played; and frames
+     * skipped because a later packet showed theirs was lost. */
     uint32_t late;
     uint32_t lost;
 } swapp_jitter;
@@ -70,8 +74,9 @@ typedef struct {
 
 void swapp_adapt_reset(swapp_adapt *a);
 /* One accepted datagram; now_ms is a monotonic clock. A new stream_id, or a
- * gap longer than SWAPP_ADAPT_GAP_MS since the previous arrival, resets. */
-void swapp_adapt_arrival(swapp_adapt *a, uint32_t stream_id, uint32_t seq, int64_t now_ms);
+ * gap longer than SWAPP_ADAPT_GAP_MS since the previous arrival, resets, and
+ * then it returns nonzero: this packet starts a new window. */
+int swapp_adapt_arrival(swapp_adapt *a, uint32_t stream_id, uint32_t seq, int64_t now_ms);
 /* The jitter target in ms: a multiple of 10 within
  * [SWAPP_AUDIO_TARGET_MIN_MS, SWAPP_AUDIO_TARGET_MAX_MS], or
  * SWAPP_AUDIO_TARGET_START_MS until a second of data exists. */

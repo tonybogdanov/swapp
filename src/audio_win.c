@@ -265,15 +265,12 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
     uint32_t last_peer = 0;
 
     /* Late and lost frames per second for the last HEALTH_SECONDS, from the
-     * jitter buffer's running totals. The totals restart when the render
-     * thread re-creates the buffer, so a total below the last one read is
-     * all new. */
+     * jitter buffer's running totals, which survive the render thread
+     * re-creating the buffer. */
     int late_ring[HEALTH_SECONDS] = {0}, lost_ring[HEALTH_SECONDS] = {0};
     int ring_at = 0;
     ULONGLONG ring_tick = GetTickCount64();
     uint32_t seen_late = 0, seen_lost = 0;
-    int has_stream = 0;
-    uint32_t stream = 0;
 
     while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
         uint8_t buf[SWAPP_AUDIO_HEADER_SIZE + SWAPP_AUDIO_MAX_PAYLOAD + 1];
@@ -292,14 +289,7 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
             swapp_audio_packet pkt;
             if (swapp_audio_packet_parse(buf, (size_t)n, &pkt)) {
                 last_accept = GetTickCount64();
-                if (pkt.payload_len > 0 && (!has_stream || pkt.stream_id != stream)) {
-                    /* A new sender starts with a clean record: the stall that
-                     * ended the previous one is not its doing. */
-                    memset(late_ring, 0, sizeof late_ring);
-                    memset(lost_ring, 0, sizeof lost_ring);
-                    has_stream = 1;
-                    stream = pkt.stream_id;
-                }
+                int restarted = 0;
                 int64_t now_ms = swapp_audio_now_ms();
                 EnterCriticalSection(&g_jitter_lock);
                 swapp_jitter_push(&g_jitter, pkt.stream_id, pkt.seq, pkt.payload, pkt.payload_len);
@@ -307,11 +297,23 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
                  * packet too late to play still counts: its lateness is
                  * exactly what the target has to cover. */
                 if (pkt.payload_len > 0) {
-                    swapp_adapt_arrival(&g_adapt, pkt.stream_id, pkt.seq, now_ms);
+                    if (swapp_adapt_arrival(&g_adapt, pkt.stream_id, pkt.seq, now_ms)) {
+                        /* A new sender, or the same one after a pause, starts
+                         * with a clean record: whatever ended the previous
+                         * run is not its doing. Counts up to now are taken
+                         * as seen, so none of them carry over. */
+                        restarted = 1;
+                        seen_late = g_jitter.late;
+                        seen_lost = g_jitter.lost;
+                    }
                     swapp_jitter_set_target(&g_jitter,
                                             MS_TO_FRAMES(swapp_adapt_target_ms(&g_adapt, now_ms)));
                 }
                 LeaveCriticalSection(&g_jitter_lock);
+                if (restarted) {
+                    memset(late_ring, 0, sizeof late_ring);
+                    memset(lost_ring, 0, sizeof lost_ring);
+                }
             }
         }
 
@@ -328,8 +330,8 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
         if (tick - ring_tick >= 1000) {
             ring_tick = tick; /* a whole window passed: every slot is already clear */
         }
-        late_ring[ring_at] += (int)(late >= seen_late ? late - seen_late : late);
-        lost_ring[ring_at] += (int)(lost >= seen_lost ? lost - seen_lost : lost);
+        late_ring[ring_at] += (int)(late - seen_late);
+        lost_ring[ring_at] += (int)(lost - seen_lost);
         seen_late = late;
         seen_lost = lost;
         int late_minute = 0, lost_minute = 0;
@@ -686,7 +688,11 @@ static int swapp_output_open(swapp_output *o, char *name, size_t name_size) {
          * as added latency for good: start again from the target, which the
          * lateness measured so far still holds. */
         EnterCriticalSection(&g_jitter_lock);
+        /* The totals carry over: the health readout counts across reopens. */
+        uint32_t late = g_jitter.late, lost = g_jitter.lost;
         swapp_jitter_init(&g_jitter, g_jitter.target_frames);
+        g_jitter.late = late;
+        g_jitter.lost = lost;
         LeaveCriticalSection(&g_jitter_lock);
         /* Filled before Start, so the device does not begin on an empty
          * buffer. */

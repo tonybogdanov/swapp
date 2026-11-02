@@ -12,6 +12,7 @@ static void reset_to(swapp_jitter *j, uint32_t seq) {
     j->next_seq = seq;
     j->priming = 1;
     j->lost_run = 0;
+    j->stall_run = 0;
 }
 
 void swapp_jitter_init(swapp_jitter *j, int target_frames) {
@@ -21,6 +22,7 @@ void swapp_jitter_init(swapp_jitter *j, int target_frames) {
     j->next_seq = 0;
     j->priming = 1;
     j->lost_run = 0;
+    j->stall_run = 0;
     j->target_frames = target_frames;
     j->late = 0;
     j->lost = 0;
@@ -85,12 +87,27 @@ swapp_jitter_result swapp_jitter_pop(swapp_jitter *j, uint8_t *out, size_t *out_
     }
 
     slot = j->next_seq % SWAPP_JITTER_SLOTS;
+    if (j->stall_run > 0 && !(j->used[slot] && j->seq[slot] == j->next_seq) &&
+        swapp_jitter_depth(j) > 0) {
+        /* A stall on this slot ends with a later packet: this one was lost,
+         * not late. The stall already concealed a frame for it, so move past
+         * it without concealing again and play the next slot now; the rest
+         * of the stall delayed everything after it, so those frames were
+         * late. */
+        j->late += j->stall_run - 1;
+        j->lost++;
+        j->stall_run = 0;
+        j->next_seq++;
+        slot = j->next_seq % SWAPP_JITTER_SLOTS;
+    }
     if (j->used[slot] && j->seq[slot] == j->next_seq) {
         memcpy(out, j->payload[slot], j->len[slot]);
         *out_len = j->len[slot];
         j->used[slot] = 0;
         j->next_seq++;
         j->lost_run = 0;
+        j->late += j->stall_run; /* the stall resolved: its packet came late */
+        j->stall_run = 0;
         return SWAPP_JITTER_PACKET;
     }
 
@@ -103,12 +120,15 @@ swapp_jitter_result swapp_jitter_pop(swapp_jitter *j, uint8_t *out, size_t *out_
         j->next_seq++;
         j->lost++;
     } else {
-        j->late++;
+        j->stall_run++;
     }
     if (++j->lost_run >= SWAPP_JITTER_MAX_LOST) {
-        /* Nothing for 200 ms: stop concealing and wait for the stream to refill. */
+        /* Nothing for 200 ms: stop concealing and wait for the stream to
+         * refill. A stall this long is the sender pausing (the capture
+         * suspended), not packets running late, so it counts as neither. */
         j->priming = 1;
         j->lost_run = 0;
+        j->stall_run = 0;
         return SWAPP_JITTER_SILENCE;
     }
     return SWAPP_JITTER_LOST;
@@ -123,9 +143,9 @@ void swapp_adapt_reset(swapp_adapt *a) {
     for (int i = 0; i < SWAPP_ADAPT_SECONDS; i++) a->second[i] = -1;
 }
 
-void swapp_adapt_arrival(swapp_adapt *a, uint32_t stream_id, uint32_t seq, int64_t now_ms) {
+int swapp_adapt_arrival(swapp_adapt *a, uint32_t stream_id, uint32_t seq, int64_t now_ms) {
     int64_t d, second;
-    int i;
+    int i, restarted = 0;
     if (!a->has_stream || stream_id != a->stream_id || now_ms - a->last_ms > SWAPP_ADAPT_GAP_MS) {
         /* A new sender's timing says nothing about the old one's, and after a
          * pause neither does the same sender's: D has shifted by however long
@@ -136,6 +156,7 @@ void swapp_adapt_arrival(swapp_adapt *a, uint32_t stream_id, uint32_t seq, int64
         a->stream_id = stream_id;
         a->base_seq = seq;
         a->first_ms = now_ms;
+        restarted = 1;
     }
     a->last_ms = now_ms;
     d = now_ms - (int64_t)seq_diff(seq, a->base_seq) * 10;
@@ -149,6 +170,7 @@ void swapp_adapt_arrival(swapp_adapt *a, uint32_t stream_id, uint32_t seq, int64
         if (d < a->min_d[i]) a->min_d[i] = d;
         if (d > a->max_d[i]) a->max_d[i] = d;
     }
+    return restarted;
 }
 
 int swapp_adapt_target_ms(const swapp_adapt *a, int64_t now_ms) {
