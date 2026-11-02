@@ -183,6 +183,10 @@ static SOCKET swapp_audio_bind(void) {
     /* The timeout is what lets the loop notice a stop and re-evaluate the
      * status as time passes. */
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms, sizeof timeout_ms);
+    /* Room for about a second of datagrams, so a moment without CPU for this
+     * thread delays audio instead of dropping it. */
+    int rcvbuf = 256 * 1024;
+    setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *)&rcvbuf, sizeof rcvbuf);
     if (bind(s, (struct sockaddr *)&addr, sizeof addr) != 0) {
         closesocket(s);
         return INVALID_SOCKET;
@@ -212,6 +216,13 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
         WSACleanup();
         return 0;
     }
+
+    /* This thread shares the jitter lock with the render thread. At normal
+     * priority, a busy CPU (a video encode) preempts it while it holds the
+     * lock or before it drains the socket, and the render thread runs dry.
+     * Same MMCSS class as the render thread; may fail like it. */
+    DWORD task_index = 0;
+    HANDLE task = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
 
     ULONGLONG last_accept = 0; /* 0: nothing accepted from the current client yet */
     uint32_t last_peer = 0;
@@ -247,6 +258,9 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
         swapp_audio_refresh_status();
     }
 
+    if (task) {
+        AvRevertMmThreadCharacteristics(task);
+    }
     closesocket(sock);
     WSACleanup();
     return 0;
