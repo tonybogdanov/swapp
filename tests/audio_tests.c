@@ -344,8 +344,9 @@ static void test_adapt_clamped(void) {
     int64_t t;
     swapp_adapt_reset(&ad);
     t = afeed(1, &seq, 5000000, 5002000, 0);
-    swapp_adapt_arrival(&ad, 1, seq++, t + 500);
-    EXPECT(swapp_adapt_target_ms(&ad, t + 500) == SWAPP_AUDIO_TARGET_MAX_MS);
+    /* Late, but not so late that it reads as a capture pause. */
+    swapp_adapt_arrival(&ad, 1, seq++, t + 400);
+    EXPECT(swapp_adapt_target_ms(&ad, t + 400) == SWAPP_AUDIO_TARGET_MAX_MS);
 }
 
 static void test_adapt_new_stream_resets(void) {
@@ -369,6 +370,31 @@ static void test_adapt_seq_wraps(void) {
     t = afeed(1, &seq, 5000000, 5005000, 0);
     EXPECT(seq < 0x1000u);
     EXPECT(swapp_adapt_target_ms(&ad, t) == SWAPP_AUDIO_TARGET_MIN_MS);
+}
+
+/* A capture pause: seq carries on, but 2 s later. The window restarts. */
+static void test_adapt_gap_resets(void) {
+    uint32_t seq = 0;
+    int64_t t;
+    swapp_adapt_reset(&ad);
+    t = afeed(1, &seq, 5000000, 5002000, 0);
+    EXPECT(swapp_adapt_target_ms(&ad, t) == SWAPP_AUDIO_TARGET_MIN_MS);
+    t += 2000;
+    swapp_adapt_arrival(&ad, 1, seq++, t);
+    EXPECT(swapp_adapt_target_ms(&ad, t) == SWAPP_AUDIO_TARGET_START_MS);
+    t = afeed(1, &seq, t + 10, t + 1010, 0);
+    EXPECT(swapp_adapt_target_ms(&ad, t) == SWAPP_AUDIO_TARGET_MIN_MS);
+}
+
+/* A gap short of SWAPP_ADAPT_GAP_MS is lateness to cover, not a pause. */
+static void test_adapt_short_gap_counts(void) {
+    uint32_t seq = 0;
+    int64_t t;
+    swapp_adapt_reset(&ad);
+    t = afeed(1, &seq, 5000000, 5002000, 0);
+    t += 300;
+    swapp_adapt_arrival(&ad, 1, seq++, t);
+    EXPECT(swapp_adapt_target_ms(&ad, t) == SWAPP_AUDIO_TARGET_MAX_MS);
 }
 
 static double run_drift(swapp_drift *d, int n, double fill, double target) {
@@ -446,6 +472,8 @@ int main(void) {
     test_adapt_clamped();
     test_adapt_new_stream_resets();
     test_adapt_seq_wraps();
+    test_adapt_gap_resets();
+    test_adapt_short_gap_counts();
     test_drift_at_target();
     test_drift_too_full_speeds();
     test_drift_too_empty_slows();

@@ -95,7 +95,10 @@ rather than fixed, because any fixed value was either too short for WiFi
 stalls or wasted delay on a calm link; an empty slot with nothing behind it
 is a stall and keeps its place, so the late packet still plays and the stall
 grows the buffer, while one with a later packet behind it is a loss and is
-skipped.
+skipped. An arrival more than 500 ms after the previous one restarts that
+window, because a capture pause (music stopped, the sink suspended) shifts
+lateness for good and would otherwise pin the target at its maximum for a
+minute after every pause.
 
 The client does nothing without the server -- it holds no state of its own --
 but the server is whole on its own. It scans at startup, keeps the cache and

@@ -119,20 +119,25 @@ void swapp_adapt_reset(swapp_adapt *a) {
     a->stream_id = 0;
     a->base_seq = 0;
     a->first_ms = 0;
+    a->last_ms = 0;
     for (int i = 0; i < SWAPP_ADAPT_SECONDS; i++) a->second[i] = -1;
 }
 
 void swapp_adapt_arrival(swapp_adapt *a, uint32_t stream_id, uint32_t seq, int64_t now_ms) {
     int64_t d, second;
     int i;
-    if (!a->has_stream || stream_id != a->stream_id) {
-        /* A new sender's timing says nothing about the old one's. */
+    if (!a->has_stream || stream_id != a->stream_id || now_ms - a->last_ms > SWAPP_ADAPT_GAP_MS) {
+        /* A new sender's timing says nothing about the old one's, and after a
+         * pause neither does the same sender's: D has shifted by however long
+         * the capture stopped. A WiFi stall that long has already re-primed
+         * the jitter buffer, so its lost sample costs little. */
         swapp_adapt_reset(a);
         a->has_stream = 1;
         a->stream_id = stream_id;
         a->base_seq = seq;
         a->first_ms = now_ms;
     }
+    a->last_ms = now_ms;
     d = now_ms - (int64_t)seq_diff(seq, a->base_seq) * 10;
     second = now_ms / 1000;
     i = (int)(second % SWAPP_ADAPT_SECONDS);

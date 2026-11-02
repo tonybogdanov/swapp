@@ -52,19 +52,25 @@ uint32_t swapp_jitter_stream(const swapp_jitter *j);
  * target at once and lowers it only when it ages out. */
 #define SWAPP_ADAPT_SECONDS 60
 #define SWAPP_ADAPT_MARGIN_MS 10
+/* An arrival this long after the previous one starts a new window: a capture
+ * pause (music stopped, the sink suspended) shifts D for good without seq
+ * advancing, and would otherwise pin the target high for the whole window. */
+#define SWAPP_ADAPT_GAP_MS 500
 
 typedef struct {
     int has_stream;
     uint32_t stream_id;
     uint32_t base_seq; /* D is measured from the stream's first seq, so it never wraps */
     int64_t first_ms;
+    int64_t last_ms;
     int64_t second[SWAPP_ADAPT_SECONDS]; /* the second each bucket holds, -1 for none */
     int64_t min_d[SWAPP_ADAPT_SECONDS];
     int64_t max_d[SWAPP_ADAPT_SECONDS];
 } swapp_adapt;
 
 void swapp_adapt_reset(swapp_adapt *a);
-/* One accepted datagram; now_ms is a monotonic clock. A new stream_id resets. */
+/* One accepted datagram; now_ms is a monotonic clock. A new stream_id, or a
+ * gap longer than SWAPP_ADAPT_GAP_MS since the previous arrival, resets. */
 void swapp_adapt_arrival(swapp_adapt *a, uint32_t stream_id, uint32_t seq, int64_t now_ms);
 /* The jitter target in ms: a multiple of 10 within
  * [SWAPP_AUDIO_TARGET_MIN_MS, SWAPP_AUDIO_TARGET_MAX_MS], or
