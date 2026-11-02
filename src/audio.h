@@ -8,9 +8,10 @@
  * in audio_packet.h and the reasoning in net.h. Each platform implements this
  * header in audio_linux.c / audio_win.c, the same split as net.h.
  *
- * For now the client only sends empty probe datagrams and the server only
- * reports whether they arrive, which proves the UDP path through the PC's
- * firewall before any audio is built on it. */
+ * The client records the monitor of its "Swapp Audio Relay" sink, encodes it
+ * as Opus and sends one 10 ms frame per datagram. The server receives them,
+ * reorders them in a jitter buffer (audio_jitter.h), decodes them and plays
+ * them on its default output device, following the default when it changes. */
 #define SWAPP_AUDIO_RATE 48000
 #define SWAPP_AUDIO_CHANNELS 2
 #define SWAPP_AUDIO_BITRATE 256000
@@ -18,16 +19,16 @@
 #define SWAPP_AUDIO_TARGET_MS 40   /* jitter-buffer target; tuned in Stage 2 */
 #define SWAPP_AUDIO_SILENT_MS 3000 /* server: connected client, no datagram for this long */
 
-/* Starts the audio thread. Returns immediately. */
+/* Starts the audio threads. Returns immediately. */
 void swapp_audio_start(void);
 
-/* Stops the thread, waiting at most 500 ms for it; a thread that does not
- * finish in time is left behind rather than blocking shutdown. remove_device
- * matters only on the client. */
+/* Stops the threads, waiting at most 500 ms for all of them together; a
+ * thread that does not finish in time is left behind rather than blocking
+ * shutdown. remove_device matters only on the client. */
 void swapp_audio_stop(int remove_device);
 
-/* Nonzero while the relay is working (client sending, server receiving);
- * drives the row icon, check versus spinner. */
+/* Nonzero while the relay is working (client capturing and sending, server
+ * receiving and playing); drives the row icon, check versus spinner. */
 int swapp_audio_ok(void);
 
 /* A one-line status for the UI, written into buf. */

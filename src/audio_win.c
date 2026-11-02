@@ -1,8 +1,16 @@
-/* Audio relay, server side. For now: receive the client's UDP datagrams and
- * report whether any arrive, which proves the path through this PC's
- * firewall. Real audio replaces the datagram handling later. */
+/* Audio relay, server side: receive the client's Opus datagrams over UDP,
+ * reorder them in a jitter buffer, decode them and play them on the default
+ * output device through WASAPI shared mode, following the default when it
+ * changes.
+ *
+ * Two threads. The receiver owns the socket and only fills the jitter buffer;
+ * the render thread owns COM, the decoder and the device, and drains it at
+ * the device's pace. The jitter buffer and the status are all they share. */
+
+#define COBJMACROS
 
 #include "audio.h"
+#include "audio_jitter.h"
 #include "audio_packet.h"
 #include "net.h"
 
@@ -13,20 +21,96 @@
 #include <string.h>
 #include <windows.h>
 
-#define STOP_WAIT_MS 500
+#include <initguid.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <functiondiscoverykeys_devpkey.h>
+#include <mmreg.h>
+#include <avrt.h>
 
-static CRITICAL_SECTION g_lock;
+#include <opus.h>
+
+#define STOP_WAIT_MS 500
+#define RETRY_MS 1000        /* no output device: how often to look again */
+#define REOPEN_PAUSE_MS 100  /* after a stream failure, so a broken device cannot spin us */
+#define RENDER_WAIT_MS 1000  /* a device that stops signalling is noticed by polling it */
+#define BUFFER_HNS 200000    /* 20 ms, in 100 ns units */
+#define TARGET_FRAMES (SWAPP_AUDIO_TARGET_MS * SWAPP_AUDIO_RATE / 1000 / SWAPP_AUDIO_FRAME)
+
+/* The Windows SDK headers only declare these MIDL-generated IDs, which
+ * initguid.h does not reach, so whether they link under MSVC would depend on
+ * its import libraries; spelled out here, they always do. initguid.h is still
+ * needed: it is what defines PKEY_Device_FriendlyName. */
+static const GUID swapp_clsid_enumerator = {
+    0xbcde0395, 0xe52f, 0x467c, {0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e}};
+static const GUID swapp_iid_enumerator = {
+    0xa95664d2, 0x9614, 0x4f35, {0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6}};
+static const GUID swapp_iid_notification = {
+    0x7991eec9, 0x7e89, 0x4d85, {0x83, 0x90, 0x6c, 0x70, 0x3c, 0xec, 0x60, 0xc0}};
+static const GUID swapp_iid_audio_client = {
+    0x1cb9ad4c, 0xdbfa, 0x4c32, {0xb1, 0x78, 0xc2, 0xf5, 0x68, 0xa7, 0x03, 0xb2}};
+static const GUID swapp_iid_render_client = {
+    0xf294acfc, 0x3146, 0x4483, {0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2}};
+static const GUID swapp_iid_unknown = {
+    0x00000000, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+static const GUID swapp_subtype_float = { /* KSDATAFORMAT_SUBTYPE_IEEE_FLOAT */
+    0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+
+typedef enum { OUTPUT_PENDING, OUTPUT_OPEN, OUTPUT_NONE } swapp_output_state;
+
+static CRITICAL_SECTION g_lock; /* the status fields below */
+static int g_locks_ready = 0;
 static HANDLE g_thread = NULL;
+static HANDLE g_render_thread = NULL;
+static HANDLE g_stop_event = NULL;
+static HANDLE g_change_event = NULL;
 static volatile LONG g_stop = 0;
 static int g_ok = 0;
-static char g_text[96] = "Audio: waiting for the client";
+static char g_text[128] = "Audio: waiting for the client";
 static void (*g_state_callback)(void) = NULL;
 
-/* Stores the text and ok flag, and runs the callback only when the text
- * changed. Like the net module, the callback runs on this thread and the tray
- * marshals it to the UI thread. */
-static void swapp_audio_set_status(const char *text, int ok) {
+/* What each thread reports, combined into the status text. */
+static int g_udp_failed = 0;
+static int g_connected = 0;
+static uint32_t g_peer_be = 0;
+static ULONGLONG g_last_accept = 0; /* 0: nothing accepted from the current client yet */
+static swapp_output_state g_output = OUTPUT_PENDING;
+static char g_output_name[96] = "";
+
+/* About 80 KB: far too big for a thread stack, so it lives here. */
+static CRITICAL_SECTION g_jitter_lock;
+static swapp_jitter g_jitter;
+
+/* Rebuilds the status from both threads' state, and runs the callback only
+ * when the text changed. Built and stored under one lock, so two threads
+ * refreshing at once cannot leave an older text behind. Like the net module,
+ * the callback runs on the calling thread and the tray marshals it to the UI
+ * thread. */
+static void swapp_audio_refresh_status(void) {
     EnterCriticalSection(&g_lock);
+    char text[sizeof g_text];
+    int ok = 0;
+    if (g_udp_failed) {
+        snprintf(text, sizeof text, "Audio: UDP port 21423 unavailable");
+    } else if (g_output == OUTPUT_NONE) {
+        snprintf(text, sizeof text, "Audio: no output device");
+    } else if (!g_connected) {
+        snprintf(text, sizeof text, "Audio: waiting for the client");
+    } else {
+        char ip[INET_ADDRSTRLEN];
+        struct in_addr addr = {.s_addr = g_peer_be};
+        inet_ntop(AF_INET, &addr, ip, sizeof ip);
+        if (g_last_accept != 0 && GetTickCount64() - g_last_accept < SWAPP_AUDIO_SILENT_MS) {
+            ok = 1;
+            if (g_output == OUTPUT_OPEN) {
+                snprintf(text, sizeof text, "Audio: playing on %s", g_output_name);
+            } else {
+                snprintf(text, sizeof text, "Audio: receiving from %s", ip);
+            }
+        } else {
+            snprintf(text, sizeof text, "Audio: nothing from %s over UDP", ip);
+        }
+    }
     int changed = strcmp(text, g_text) != 0;
     if (changed) {
         _snprintf_s(g_text, sizeof g_text, _TRUNCATE, "%s", text);
@@ -37,6 +121,16 @@ static void swapp_audio_set_status(const char *text, int ok) {
         g_state_callback();
     }
 }
+
+static void swapp_audio_set_output(swapp_output_state state, const char *name) {
+    EnterCriticalSection(&g_lock);
+    g_output = state;
+    _snprintf_s(g_output_name, sizeof g_output_name, _TRUNCATE, "%s", name ? name : "");
+    LeaveCriticalSection(&g_lock);
+    swapp_audio_refresh_status();
+}
+
+/* ---- Receiving ---- */
 
 static SOCKET swapp_audio_bind(void) {
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -58,18 +152,25 @@ static SOCKET swapp_audio_bind(void) {
     return s;
 }
 
+static void swapp_audio_udp_failed(void) {
+    EnterCriticalSection(&g_lock);
+    g_udp_failed = 1;
+    LeaveCriticalSection(&g_lock);
+    swapp_audio_refresh_status();
+}
+
 static DWORD WINAPI swapp_audio_thread(LPVOID param) {
     (void)param;
 
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        swapp_audio_set_status("Audio: UDP port 21423 unavailable", 0);
+        swapp_audio_udp_failed();
         return 0;
     }
     SOCKET sock = swapp_audio_bind();
     if (sock == INVALID_SOCKET) {
         /* Not fatal for the app, but permanent for audio: nothing retries. */
-        swapp_audio_set_status("Audio: UDP port 21423 unavailable", 0);
+        swapp_audio_udp_failed();
         WSACleanup();
         return 0;
     }
@@ -94,25 +195,18 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
             swapp_audio_packet pkt;
             if (swapp_audio_packet_parse(buf, (size_t)n, &pkt)) {
                 last_accept = GetTickCount64();
+                EnterCriticalSection(&g_jitter_lock);
+                swapp_jitter_push(&g_jitter, pkt.stream_id, pkt.seq, pkt.payload, pkt.payload_len);
+                LeaveCriticalSection(&g_jitter_lock);
             }
         }
 
-        char text[96];
-        int ok = 0;
-        if (!connected) {
-            snprintf(text, sizeof text, "Audio: waiting for the client");
-        } else {
-            char ip[INET_ADDRSTRLEN];
-            struct in_addr addr = {.s_addr = peer_be};
-            inet_ntop(AF_INET, &addr, ip, sizeof ip);
-            if (last_accept != 0 && GetTickCount64() - last_accept < SWAPP_AUDIO_SILENT_MS) {
-                snprintf(text, sizeof text, "Audio: receiving from %s", ip);
-                ok = 1;
-            } else {
-                snprintf(text, sizeof text, "Audio: nothing from %s over UDP", ip);
-            }
-        }
-        swapp_audio_set_status(text, ok);
+        EnterCriticalSection(&g_lock);
+        g_connected = connected;
+        g_peer_be = last_peer;
+        g_last_accept = last_accept;
+        LeaveCriticalSection(&g_lock);
+        swapp_audio_refresh_status();
     }
 
     closesocket(sock);
@@ -120,27 +214,418 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
     return 0;
 }
 
-void swapp_audio_start(void) {
-    if (g_thread) {
+/* ---- Following the default output ---- */
+
+/* A C implementation of IMMNotificationClient. It is a single static object,
+ * so the reference count is pinned at 1. */
+static HRESULT STDMETHODCALLTYPE swapp_notify_query(IMMNotificationClient *self, REFIID riid,
+                                                    void **out) {
+    if (IsEqualGUID(riid, &swapp_iid_unknown) || IsEqualGUID(riid, &swapp_iid_notification)) {
+        *out = self;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE swapp_notify_add_ref(IMMNotificationClient *self) {
+    (void)self;
+    return 1;
+}
+
+static ULONG STDMETHODCALLTYPE swapp_notify_release(IMMNotificationClient *self) {
+    (void)self;
+    return 1;
+}
+
+static HRESULT STDMETHODCALLTYPE swapp_notify_state(IMMNotificationClient *self, LPCWSTR id,
+                                                    DWORD state) {
+    (void)self;
+    (void)id;
+    (void)state;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE swapp_notify_added(IMMNotificationClient *self, LPCWSTR id) {
+    (void)self;
+    (void)id;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE swapp_notify_removed(IMMNotificationClient *self, LPCWSTR id) {
+    (void)self;
+    (void)id;
+    return S_OK;
+}
+
+/* Runs on a system thread, so it only signals the render thread. */
+static HRESULT STDMETHODCALLTYPE swapp_notify_default(IMMNotificationClient *self, EDataFlow flow,
+                                                      ERole role, LPCWSTR id) {
+    (void)self;
+    (void)id;
+    if (flow == eRender && role == eConsole) {
+        SetEvent(g_change_event);
+    }
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE swapp_notify_property(IMMNotificationClient *self, LPCWSTR id,
+                                                       const PROPERTYKEY key) {
+    (void)self;
+    (void)id;
+    (void)key;
+    return S_OK;
+}
+
+static IMMNotificationClientVtbl g_notify_vtbl = {
+    .QueryInterface = swapp_notify_query,
+    .AddRef = swapp_notify_add_ref,
+    .Release = swapp_notify_release,
+    .OnDeviceStateChanged = swapp_notify_state,
+    .OnDeviceAdded = swapp_notify_added,
+    .OnDeviceRemoved = swapp_notify_removed,
+    .OnDefaultDeviceChanged = swapp_notify_default,
+    .OnPropertyValueChanged = swapp_notify_property,
+};
+static IMMNotificationClient g_notify = {&g_notify_vtbl};
+
+/* ---- Playing ---- */
+
+typedef struct {
+    IMMDeviceEnumerator *enumerator;
+    int registered;
+    IMMDevice *device;
+    IAudioClient *client;
+    IAudioRenderClient *render;
+    HANDLE event;
+    UINT32 buffer_frames;
+    OpusDecoder *decoder;
+    uint32_t stream; /* the jitter buffer's stream the decoder last saw */
+} swapp_output;
+
+/* Decodes the next 10 ms into pcm. Returns 0 when there is nothing to play,
+ * and the caller writes silence instead. */
+static int swapp_output_decode(swapp_output *o, float *pcm) {
+    uint8_t payload[SWAPP_AUDIO_MAX_PAYLOAD];
+    size_t len = 0;
+    EnterCriticalSection(&g_jitter_lock);
+    swapp_jitter_result result = swapp_jitter_pop(&g_jitter, payload, &len);
+    uint32_t stream = swapp_jitter_stream(&g_jitter);
+    LeaveCriticalSection(&g_jitter_lock);
+
+    if (!o->decoder) {
+        return 0;
+    }
+    if (stream != o->stream) {
+        /* A new sender: the previous one's decoder history would only
+         * smear into its first frames. */
+        opus_decoder_ctl(o->decoder, OPUS_RESET_STATE);
+        o->stream = stream;
+    }
+    int samples;
+    if (result == SWAPP_JITTER_PACKET) {
+        samples = opus_decode_float(o->decoder, payload, (opus_int32)len, pcm, SWAPP_AUDIO_FRAME, 0);
+    } else if (result == SWAPP_JITTER_LOST) {
+        samples = opus_decode_float(o->decoder, NULL, 0, pcm, SWAPP_AUDIO_FRAME, 0);
+    } else {
+        return 0;
+    }
+    return samples == SWAPP_AUDIO_FRAME;
+}
+
+/* Fills whatever room the device buffer has, in whole 10 ms frames. */
+static HRESULT swapp_output_feed(swapp_output *o) {
+    UINT32 padding = 0;
+    HRESULT hr = IAudioClient_GetCurrentPadding(o->client, &padding);
+    if (FAILED(hr)) {
+        return hr;
+    }
+    while (o->buffer_frames - padding >= SWAPP_AUDIO_FRAME) {
+        BYTE *data = NULL;
+        hr = IAudioRenderClient_GetBuffer(o->render, SWAPP_AUDIO_FRAME, &data);
+        if (FAILED(hr)) {
+            return hr;
+        }
+        int ok = swapp_output_decode(o, (float *)data);
+        hr = IAudioRenderClient_ReleaseBuffer(o->render, SWAPP_AUDIO_FRAME,
+                                              ok ? 0 : AUDCLNT_BUFFERFLAGS_SILENT);
+        if (FAILED(hr)) {
+            return hr;
+        }
+        padding += SWAPP_AUDIO_FRAME;
+    }
+    return S_OK;
+}
+
+/* Releases the stream and the device, keeping the enumerator, its
+ * registration and the decoder. */
+static void swapp_output_close(swapp_output *o) {
+    if (o->client) {
+        IAudioClient_Stop(o->client);
+    }
+    if (o->render) {
+        IAudioRenderClient_Release(o->render);
+        o->render = NULL;
+    }
+    if (o->client) {
+        IAudioClient_Release(o->client);
+        o->client = NULL;
+    }
+    if (o->device) {
+        IMMDevice_Release(o->device);
+        o->device = NULL;
+    }
+}
+
+static void swapp_output_name(IMMDevice *device, char *name, size_t size) {
+    snprintf(name, size, "the default output");
+    IPropertyStore *store = NULL;
+    if (FAILED(IMMDevice_OpenPropertyStore(device, STGM_READ, &store))) {
         return;
     }
-    InitializeCriticalSection(&g_lock);
+    PROPVARIANT value;
+    PropVariantInit(&value);
+    if (SUCCEEDED(IPropertyStore_GetValue(store, &PKEY_Device_FriendlyName, &value)) &&
+        value.vt == VT_LPWSTR && value.pwszVal) {
+        /* The ANSI code page rather than UTF-8: the tray shows this text with
+         * SetWindowTextA, which reads it in that code page. */
+        if (!WideCharToMultiByte(CP_ACP, 0, value.pwszVal, -1, name, (int)size, NULL, NULL)) {
+            snprintf(name, size, "the default output");
+        }
+    }
+    PropVariantClear(&value);
+    IPropertyStore_Release(store);
+}
+
+/* Opens the current default output and starts it. Returns 0, with nothing
+ * left open, when there is no usable device. */
+static int swapp_output_open(swapp_output *o, char *name, size_t name_size) {
+    HRESULT hr;
+    if (!o->enumerator) {
+        hr = CoCreateInstance(&swapp_clsid_enumerator, NULL, CLSCTX_ALL, &swapp_iid_enumerator,
+                              (void **)&o->enumerator);
+        if (FAILED(hr)) {
+            o->enumerator = NULL;
+            return 0;
+        }
+        o->registered = SUCCEEDED(
+            IMMDeviceEnumerator_RegisterEndpointNotificationCallback(o->enumerator, &g_notify));
+    }
+    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(o->enumerator, eRender, eConsole, &o->device);
+    if (FAILED(hr)) {
+        o->device = NULL;
+        return 0;
+    }
+    swapp_output_name(o->device, name, name_size);
+
+    hr = IMMDevice_Activate(o->device, &swapp_iid_audio_client, CLSCTX_ALL, NULL,
+                            (void **)&o->client);
+    if (FAILED(hr)) {
+        o->client = NULL;
+        swapp_output_close(o);
+        return 0;
+    }
+
+    /* Exactly what the decoder produces; the shared-mode engine converts it
+     * to whatever the device mixes in, so the device's format never
+     * matters here. */
+    WAVEFORMATEXTENSIBLE format = {0};
+    format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    format.Format.nChannels = SWAPP_AUDIO_CHANNELS;
+    format.Format.nSamplesPerSec = SWAPP_AUDIO_RATE;
+    format.Format.wBitsPerSample = 32;
+    format.Format.nBlockAlign = (WORD)(SWAPP_AUDIO_CHANNELS * sizeof(float));
+    format.Format.nAvgBytesPerSec = (DWORD)SWAPP_AUDIO_RATE * format.Format.nBlockAlign;
+    format.Format.cbSize = (WORD)(sizeof format - sizeof format.Format);
+    format.Samples.wValidBitsPerSample = 32;
+    format.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    format.SubFormat = swapp_subtype_float;
+
+    hr = IAudioClient_Initialize(o->client, AUDCLNT_SHAREMODE_SHARED,
+                                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+                                     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                                     AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                                 BUFFER_HNS, 0, &format.Format, NULL);
+    if (SUCCEEDED(hr)) {
+        hr = IAudioClient_SetEventHandle(o->client, o->event);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = IAudioClient_GetBufferSize(o->client, &o->buffer_frames);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = IAudioClient_GetService(o->client, &swapp_iid_render_client, (void **)&o->render);
+        if (FAILED(hr)) {
+            o->render = NULL;
+        }
+    }
+    if (SUCCEEDED(hr)) {
+        /* Whatever piled up while there was no stream would otherwise stay
+         * as added latency for good: start again from the target. */
+        EnterCriticalSection(&g_jitter_lock);
+        swapp_jitter_init(&g_jitter, TARGET_FRAMES);
+        LeaveCriticalSection(&g_jitter_lock);
+        /* Filled before Start, so the device does not begin on an empty
+         * buffer. */
+        hr = swapp_output_feed(o);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = IAudioClient_Start(o->client);
+    }
+    if (FAILED(hr)) {
+        swapp_output_close(o);
+        return 0;
+    }
+    return 1;
+}
+
+static DWORD WINAPI swapp_audio_render_thread(LPVOID param) {
+    (void)param;
+    HRESULT com = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    DWORD task_index = 0;
+    /* May fail (the MMCSS service can be off); playback works without it,
+     * just with less protection from other load. */
+    HANDLE task = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
+
+    swapp_output out = {0};
+    int err = 0;
+    out.decoder = opus_decoder_create(SWAPP_AUDIO_RATE, SWAPP_AUDIO_CHANNELS, &err);
+    if (err != OPUS_OK) {
+        out.decoder = NULL; /* plays silence rather than nothing */
+    }
+    out.event = CreateEventW(NULL, FALSE, FALSE, NULL);
+
+    HANDLE waits[3] = {out.event, g_stop_event, g_change_event};
+    int open = 0;
+    DWORD pause = 0; /* before the next open attempt */
+
+    while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
+        if (!open) {
+            if (pause) {
+                /* Woken early by stop, or by a new default to try at once. */
+                WaitForMultipleObjects(2, waits + 1, FALSE, pause);
+                if (InterlockedCompareExchange(&g_stop, 0, 0)) {
+                    break;
+                }
+            }
+            char name[96];
+            if (SUCCEEDED(com) && out.event && swapp_output_open(&out, name, sizeof name)) {
+                open = 1;
+                swapp_audio_set_output(OUTPUT_OPEN, name);
+            } else {
+                swapp_audio_set_output(OUTPUT_NONE, NULL);
+                pause = RETRY_MS;
+                continue;
+            }
+        }
+
+        DWORD w = WaitForMultipleObjects(3, waits, FALSE, RENDER_WAIT_MS);
+        if (w == WAIT_OBJECT_0 + 1) {
+            break;
+        }
+        HRESULT hr;
+        if (w == WAIT_OBJECT_0 + 2) {
+            /* A new default: the open stream is now the wrong device, which
+             * is handled exactly like losing it. */
+            hr = AUDCLNT_E_DEVICE_INVALIDATED;
+            pause = 0;
+        } else {
+            /* The render event, or the timeout: either way the device is
+             * asked, and a vanished one answers with an error. Any failure,
+             * AUDCLNT_E_DEVICE_INVALIDATED or otherwise, leaves the stream
+             * unusable, so all of them reopen. */
+            hr = swapp_output_feed(&out);
+            pause = REOPEN_PAUSE_MS;
+        }
+        if (FAILED(hr)) {
+            swapp_output_close(&out);
+            open = 0;
+        }
+    }
+
+    swapp_output_close(&out);
+    if (out.enumerator) {
+        if (out.registered) {
+            IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(out.enumerator, &g_notify);
+        }
+        IMMDeviceEnumerator_Release(out.enumerator);
+    }
+    if (out.event) {
+        CloseHandle(out.event);
+    }
+    if (out.decoder) {
+        opus_decoder_destroy(out.decoder);
+    }
+    if (task) {
+        AvRevertMmThreadCharacteristics(task);
+    }
+    if (SUCCEEDED(com)) {
+        CoUninitialize();
+    }
+    return 0;
+}
+
+/* ---- Public ---- */
+
+void swapp_audio_start(void) {
+    if (g_thread || g_render_thread) {
+        return;
+    }
+    if (!g_locks_ready) {
+        InitializeCriticalSection(&g_lock);
+        InitializeCriticalSection(&g_jitter_lock);
+        g_locks_ready = 1;
+    }
+    swapp_jitter_init(&g_jitter, TARGET_FRAMES);
     InterlockedExchange(&g_stop, 0);
+    g_stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_change_event = CreateEventW(NULL, FALSE, FALSE, NULL);
     g_thread = CreateThread(NULL, 0, swapp_audio_thread, NULL, 0, NULL);
+    if (g_stop_event && g_change_event) {
+        /* With no events to wait on, the server still receives; it just
+         * cannot play. */
+        g_render_thread = CreateThread(NULL, 0, swapp_audio_render_thread, NULL, 0, NULL);
+    }
 }
 
 void swapp_audio_stop(int remove_device) {
     /* Nothing to remove on the server. */
     (void)remove_device;
-    if (!g_thread) {
+    if (!g_thread && !g_render_thread) {
         return;
     }
     InterlockedExchange(&g_stop, 1);
-    /* Bounded: the thread wakes within its 200 ms receive timeout, and if it
-     * is stuck anyway shutdown must not hang on it. */
-    WaitForSingleObject(g_thread, STOP_WAIT_MS);
-    CloseHandle(g_thread);
+    if (g_stop_event) {
+        SetEvent(g_stop_event);
+    }
+    HANDLE threads[2];
+    DWORD count = 0;
+    if (g_thread) {
+        threads[count++] = g_thread;
+    }
+    if (g_render_thread) {
+        threads[count++] = g_render_thread;
+    }
+    /* One wait for both, so the 500 ms covers them together. The receiver
+     * wakes within its 200 ms receive timeout and the render thread at once,
+     * and if either is stuck anyway shutdown must not hang on it. */
+    DWORD w = WaitForMultipleObjects(count, threads, TRUE, STOP_WAIT_MS);
+    int finished = w < WAIT_OBJECT_0 + count;
+    for (DWORD i = 0; i < count; i++) {
+        CloseHandle(threads[i]);
+    }
     g_thread = NULL;
+    g_render_thread = NULL;
+    if (finished) {
+        /* Only now: a thread left behind may still wait on them. */
+        if (g_stop_event) {
+            CloseHandle(g_stop_event);
+        }
+        if (g_change_event) {
+            CloseHandle(g_change_event);
+        }
+        g_stop_event = NULL;
+        g_change_event = NULL;
+    }
 }
 
 int swapp_audio_ok(void) {

@@ -67,7 +67,7 @@ if(WIN32)
     # renders in the pre-XP classic style.
     target_sources(swapp PRIVATE src/tray_win.c src/monitors_win.c src/net_win.c src/audio_win.c src/audio_jitter.c src/install_win.c src/autostart_win.c
                    src/update_win.c src/swapp.manifest src/swapp.rc)
-    target_link_libraries(swapp PRIVATE shell32 shlwapi winhttp user32 advapi32 dxva2 ws2_32 comctl32 uxtheme)
+    target_link_libraries(swapp PRIVATE shell32 shlwapi winhttp user32 advapi32 dxva2 ws2_32 comctl32 uxtheme ole32 avrt)
 
     # GUI subsystem so no console window is created when the app launches,
     # while keeping a plain main() entry point (no WinMain needed).
