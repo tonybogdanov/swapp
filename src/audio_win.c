@@ -39,6 +39,7 @@
 #define AUDCLNT_STREAMFLAGS_RATEADJUST 0x00100000
 #endif
 #define DRIFT_STEP_FRAMES 100 /* 1 s of 10 ms frames: how often the rate and the readout move */
+#define HEALTH_SECONDS 60 /* the window the late and lost counts cover */
 #define MS_TO_FRAMES(ms) ((ms) * SWAPP_AUDIO_RATE / 1000 / SWAPP_AUDIO_FRAME)
 
 /* The Windows SDK headers only declare these MIDL-generated IDs, which
@@ -73,6 +74,8 @@ static HANDLE g_change_event = NULL;
 static volatile LONG g_stop = 0;
 static int g_ok = 0;
 static char g_text[SWAPP_AUDIO_STATUS_MAX] = "Audio: waiting for the client";
+static char g_detail[SWAPP_AUDIO_DETAIL_MAX] = "";
+static int g_degraded = 0;
 static void (*g_state_callback)(void) = NULL;
 
 /* What each thread reports, combined into the status text. */
@@ -83,7 +86,10 @@ static ULONGLONG g_last_accept = 0; /* 0: nothing accepted from the current clie
 static swapp_output_state g_output = OUTPUT_PENDING;
 static char g_output_name[96] = "";
 static int g_buffered_ms = -1; /* the drift controller's smoothed delay, -1 until it has one */
+static int g_target_ms = -1;   /* the delay it steers toward, with g_buffered_ms */
 static int g_no_drift = 0;     /* the device refused rate adjustment */
+static int g_late_minute = 0;  /* frames late and lost in the last HEALTH_SECONDS */
+static int g_lost_minute = 0;
 
 /* About 80 KB: far too big for a thread stack, so it lives here. The
  * lateness tracker sets its target, and shares its lock. */
@@ -91,9 +97,9 @@ static CRITICAL_SECTION g_jitter_lock;
 static swapp_jitter g_jitter;
 static swapp_adapt g_adapt;
 
-/* Appends " · N ms buffered". The tray shows the status with SetWindowTextA, so
- * the dot goes through the ANSI code page like the device name does; a code
- * page without it gets a plain hyphen. */
+/* Appends " · N ms". The tray shows the status with SetWindowTextA, so the
+ * dot goes through the ANSI code page like the device name does; a code page
+ * without it gets a plain hyphen. */
 static void swapp_audio_append_buffered(char *text, size_t size, size_t at, int ms) {
     char sep[16];
     BOOL used = FALSE;
@@ -104,17 +110,18 @@ static void swapp_audio_append_buffered(char *text, size_t size, size_t at, int 
     if (!r || used) {
         strcpy(sep, " - ");
     }
-    _snprintf_s(text + at, size - at, _TRUNCATE, "%s%d ms buffered", sep, ms);
+    _snprintf_s(text + at, size - at, _TRUNCATE, "%s%d ms", sep, ms);
 }
 
-/* Rebuilds the status from both threads' state, and runs the callback only
- * when the text changed. Built and stored under one lock, so two threads
- * refreshing at once cannot leave an older text behind. Like the net module,
- * the callback runs on the calling thread and the tray marshals it to the UI
- * thread. */
+/* Rebuilds the status and the detail from both threads' state, and runs the
+ * callback only when either text or the degraded flag changed. Built and
+ * stored under one lock, so two threads refreshing at once cannot leave an
+ * older text behind. Like the net module, the callback runs on the calling
+ * thread and the tray marshals it to the UI thread. */
 static void swapp_audio_refresh_status(void) {
     EnterCriticalSection(&g_lock);
     char text[sizeof g_text];
+    char detail[sizeof g_detail] = "";
     int ok = 0;
     if (g_udp_failed) {
         snprintf(text, sizeof text, "Audio: UDP port 21423 unavailable");
@@ -129,12 +136,22 @@ static void swapp_audio_refresh_status(void) {
         if (g_last_accept != 0 && GetTickCount64() - g_last_accept < SWAPP_AUDIO_SILENT_MS) {
             ok = 1;
             if (g_output == OUTPUT_OPEN) {
-                size_t n = (size_t)snprintf(text, sizeof text, "Audio: playing on %s", g_output_name);
+                size_t n = (size_t)snprintf(text, sizeof text, "Audio: %s", g_output_name);
                 if (g_buffered_ms >= 0 && n < sizeof text) {
                     swapp_audio_append_buffered(text, sizeof text, n, g_buffered_ms);
                 }
-                if (g_no_drift && strlen(text) + 20 < sizeof text) {
-                    strcat(text, " (no drift control)");
+                /* The tooltip's lines are separated by CRLF, which a
+                 * multi-line tooltip breaks on. */
+                if (g_buffered_ms >= 0 && g_target_ms >= 0) {
+                    n = (size_t)snprintf(detail, sizeof detail, "Buffer %d ms, target %d ms\r\n",
+                                         g_buffered_ms, g_target_ms);
+                } else {
+                    n = (size_t)snprintf(detail, sizeof detail, "Buffer filling\r\n");
+                }
+                if (n < sizeof detail) {
+                    snprintf(detail + n, sizeof detail - n,
+                             "Last minute: %d late, %d lost\r\nDrift control %s", g_late_minute,
+                             g_lost_minute, g_no_drift ? "off" : "on");
                 }
             } else {
                 snprintf(text, sizeof text, "Audio: receiving from %s", ip);
@@ -143,9 +160,13 @@ static void swapp_audio_refresh_status(void) {
             snprintf(text, sizeof text, "Audio: nothing from %s over UDP", ip);
         }
     }
-    int changed = strcmp(text, g_text) != 0;
+    int degraded = ok && g_late_minute + g_lost_minute > 0;
+    int changed = strcmp(text, g_text) != 0 || strcmp(detail, g_detail) != 0
+                  || degraded != g_degraded;
     if (changed) {
         _snprintf_s(g_text, sizeof g_text, _TRUNCATE, "%s", text);
+        _snprintf_s(g_detail, sizeof g_detail, _TRUNCATE, "%s", detail);
+        g_degraded = degraded;
     }
     g_ok = ok;
     LeaveCriticalSection(&g_lock);
@@ -154,9 +175,10 @@ static void swapp_audio_refresh_status(void) {
     }
 }
 
-static void swapp_audio_set_drift_status(int buffered_ms, int no_drift) {
+static void swapp_audio_set_drift_status(int buffered_ms, int target_ms, int no_drift) {
     EnterCriticalSection(&g_lock);
     g_buffered_ms = buffered_ms;
+    g_target_ms = target_ms;
     g_no_drift = no_drift;
     LeaveCriticalSection(&g_lock);
     swapp_audio_refresh_status();
@@ -242,6 +264,17 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
     ULONGLONG last_accept = 0; /* 0: nothing accepted from the current client yet */
     uint32_t last_peer = 0;
 
+    /* Late and lost frames per second for the last HEALTH_SECONDS, from the
+     * jitter buffer's running totals. The totals restart when the render
+     * thread re-creates the buffer, so a total below the last one read is
+     * all new. */
+    int late_ring[HEALTH_SECONDS] = {0}, lost_ring[HEALTH_SECONDS] = {0};
+    int ring_at = 0;
+    ULONGLONG ring_tick = GetTickCount64();
+    uint32_t seen_late = 0, seen_lost = 0;
+    int has_stream = 0;
+    uint32_t stream = 0;
+
     while (!InterlockedCompareExchange(&g_stop, 0, 0)) {
         uint8_t buf[SWAPP_AUDIO_HEADER_SIZE + SWAPP_AUDIO_MAX_PAYLOAD + 1];
         struct sockaddr_in from;
@@ -259,6 +292,14 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
             swapp_audio_packet pkt;
             if (swapp_audio_packet_parse(buf, (size_t)n, &pkt)) {
                 last_accept = GetTickCount64();
+                if (pkt.payload_len > 0 && (!has_stream || pkt.stream_id != stream)) {
+                    /* A new sender starts with a clean record: the stall that
+                     * ended the previous one is not its doing. */
+                    memset(late_ring, 0, sizeof late_ring);
+                    memset(lost_ring, 0, sizeof lost_ring);
+                    has_stream = 1;
+                    stream = pkt.stream_id;
+                }
                 int64_t now_ms = swapp_audio_now_ms();
                 EnterCriticalSection(&g_jitter_lock);
                 swapp_jitter_push(&g_jitter, pkt.stream_id, pkt.seq, pkt.payload, pkt.payload_len);
@@ -274,7 +315,32 @@ static DWORD WINAPI swapp_audio_thread(LPVOID param) {
             }
         }
 
+        EnterCriticalSection(&g_jitter_lock);
+        uint32_t late = g_jitter.late, lost = g_jitter.lost;
+        LeaveCriticalSection(&g_jitter_lock);
+        ULONGLONG tick = GetTickCount64();
+        for (int s = 0; s < HEALTH_SECONDS && tick - ring_tick >= 1000; s++) {
+            ring_tick += 1000;
+            ring_at = (ring_at + 1) % HEALTH_SECONDS;
+            late_ring[ring_at] = 0;
+            lost_ring[ring_at] = 0;
+        }
+        if (tick - ring_tick >= 1000) {
+            ring_tick = tick; /* a whole window passed: every slot is already clear */
+        }
+        late_ring[ring_at] += (int)(late >= seen_late ? late - seen_late : late);
+        lost_ring[ring_at] += (int)(lost >= seen_lost ? lost - seen_lost : lost);
+        seen_late = late;
+        seen_lost = lost;
+        int late_minute = 0, lost_minute = 0;
+        for (int s = 0; s < HEALTH_SECONDS; s++) {
+            late_minute += late_ring[s];
+            lost_minute += lost_ring[s];
+        }
+
         EnterCriticalSection(&g_lock);
+        g_late_minute = late_minute;
+        g_lost_minute = lost_minute;
         g_connected = connected;
         g_peer_be = last_peer;
         g_last_accept = last_accept;
@@ -394,7 +460,7 @@ static void swapp_output_drift_reset(swapp_output *o) {
     }
     o->rate_nudged = 0;
     if (was_shown) {
-        swapp_audio_set_drift_status(-1, o->adjust == NULL);
+        swapp_audio_set_drift_status(-1, -1, o->adjust == NULL);
     }
 }
 
@@ -436,7 +502,8 @@ static int swapp_output_decode(swapp_output *o, float *pcm, UINT32 padding) {
                     o->rate_nudged = 0;
                 }
             }
-            swapp_audio_set_drift_status((int)(o->drift.smoothed_ms + 0.5), o->adjust == NULL);
+            swapp_audio_set_drift_status((int)(o->drift.smoothed_ms + 0.5), (int)(target_ms + 0.5),
+                                         o->adjust == NULL);
         }
     }
 
@@ -600,7 +667,7 @@ static int swapp_output_open(swapp_output *o, char *name, size_t name_size) {
     }
     if (SUCCEEDED(hr)) {
         swapp_output_drift_reset(o);
-        swapp_audio_set_drift_status(-1, no_drift);
+        swapp_audio_set_drift_status(-1, -1, no_drift);
     }
     if (SUCCEEDED(hr)) {
         hr = IAudioClient_SetEventHandle(o->client, o->event);
@@ -804,6 +871,19 @@ void swapp_audio_status_text(char *buf, size_t buf_size) {
     EnterCriticalSection(&g_lock);
     _snprintf_s(buf, buf_size, _TRUNCATE, "%s", g_text);
     LeaveCriticalSection(&g_lock);
+}
+
+void swapp_audio_detail_text(char *buf, size_t buf_size) {
+    EnterCriticalSection(&g_lock);
+    _snprintf_s(buf, buf_size, _TRUNCATE, "%s", g_detail);
+    LeaveCriticalSection(&g_lock);
+}
+
+int swapp_audio_degraded(void) {
+    EnterCriticalSection(&g_lock);
+    int degraded = g_degraded;
+    LeaveCriticalSection(&g_lock);
+    return degraded;
 }
 
 void swapp_audio_set_state_callback(void (*callback)(void)) {

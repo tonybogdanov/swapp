@@ -473,6 +473,17 @@ void swapp_audio_status_text(char *buf, size_t buf_size) {
     g_mutex_unlock(&g_lock);
 }
 
+/* The buffer and its health live on the server; the client has nothing to add. */
+void swapp_audio_detail_text(char *buf, size_t buf_size) {
+    if (buf_size > 0) {
+        buf[0] = '\0';
+    }
+}
+
+int swapp_audio_degraded(void) {
+    return 0;
+}
+
 void swapp_audio_set_state_callback(void (*callback)(void)) {
     g_state_callback = callback;
 }

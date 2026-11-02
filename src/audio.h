@@ -46,6 +46,17 @@ int swapp_audio_failed(void);
 /* A one-line status for the UI, written into buf. */
 void swapp_audio_status_text(char *buf, size_t buf_size);
 
+/* Room for the longest text swapp_audio_detail_text can produce. */
+#define SWAPP_AUDIO_DETAIL_MAX 160
+
+/* Server: the relay's health over a few lines, for the row's hover tooltip;
+ * empty while nothing is playing. The client always writes an empty string. */
+void swapp_audio_detail_text(char *buf, size_t buf_size);
+
+/* Server: nonzero when frames arrived late or were lost in the last minute,
+ * so the row's check turns amber. Always 0 on the client. */
+int swapp_audio_degraded(void);
+
 /* Registers a function called whenever the status text changes, so the tray
  * can refresh. Same contract as swapp_net_set_state_callback: on Linux it runs
  * on the GTK thread, on Windows on the audio thread and the tray marshals it

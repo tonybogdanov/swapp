@@ -504,6 +504,7 @@ typedef enum {
     SWAPP_ICON_CHECK_MUTED = 4, /* check.png again, tinted light gray */
     SWAPP_ICON_WINDOWS = 5,
     SWAPP_ICON_LINUX = 6,
+    SWAPP_ICON_CHECK_WARN = 7, /* check.png again, tinted amber: audio with recent gaps */
     SWAPP_ICON_COUNT
 } swapp_icon;
 
@@ -529,7 +530,8 @@ static GpImageAttributes *g_icon_tints[SWAPP_ICON_COUNT] = {NULL};
 
 /* Per icon, in swapp_icon order: pending blue, done green, failed red,
  * refresh dark gray, inactive-input light gray, Windows blue, Linux near-
- * black. Kept in step with the same table in tray_linux.c. */
+ * black, degraded amber. Kept in step with the same table in tray_linux.c,
+ * except the amber: only the server's audio row degrades. */
 static const float g_icon_colors[SWAPP_ICON_COUNT][3] = {
     {0x1a / 255.0f, 0x73 / 255.0f, 0xe8 / 255.0f},
     {0x1e / 255.0f, 0x8e / 255.0f, 0x3e / 255.0f},
@@ -538,6 +540,7 @@ static const float g_icon_colors[SWAPP_ICON_COUNT][3] = {
     {0xc8 / 255.0f, 0xc8 / 255.0f, 0xc8 / 255.0f},
     {0x00 / 255.0f, 0x78 / 255.0f, 0xd4 / 255.0f},
     {0x33 / 255.0f, 0x33 / 255.0f, 0x33 / 255.0f},
+    {0xf2 / 255.0f, 0x99 / 255.0f, 0x00 / 255.0f},
 };
 static float g_spinner_angle = 0.0f;
 static HFONT g_font = NULL;
@@ -582,7 +585,7 @@ static void swapp_icons_load(void) {
 
     static const char *const files[SWAPP_ICON_COUNT] = {
         "icons/spinner.png", "icons/check.png", "icons/error.png", "icons/refresh.png",
-        "icons/check.png", "icons/windows.png", "icons/linux.png"};
+        "icons/check.png", "icons/windows.png", "icons/linux.png", "icons/check.png"};
     for (int i = 0; i < SWAPP_ICON_COUNT; i++) {
         const swapp_asset *asset = swapp_asset_find(files[i]);
         if (!asset) {
@@ -649,6 +652,10 @@ typedef struct {
 static swapp_row g_client_row = {NULL, NULL, SWAPP_ICON_SPINNER};
 static swapp_row g_monitors_row = {NULL, NULL, SWAPP_ICON_SPINNER};
 static swapp_row g_audio_row = {NULL, NULL, SWAPP_ICON_SPINNER};
+/* The audio row's hover detail (swapp_audio_detail_text), and the text it
+ * last showed. */
+static HWND g_audio_tip = NULL;
+static char g_audio_tip_text[SWAPP_AUDIO_DETAIL_MAX] = "";
 
 /* Draws icon `which` into `hdc` at (x, y), `size` pixels square, in the
  * colour of icon `tint`. The spinner is drawn at its current rotation. */
@@ -827,6 +834,52 @@ static void swapp_row_create(swapp_row *row, HWND parent, int top, int width) {
                  (WPARAM)(g_font ? g_font : GetStockObject(DEFAULT_GUI_FONT)), TRUE);
 }
 
+/* Gives a row a hover tooltip, empty until swapp_row_set_tip fills it; a
+ * tooltip with no text never shows. */
+static HWND swapp_row_add_tip(swapp_row *row, HWND parent) {
+    /* A plain static is transparent to the mouse, so the tooltip's subclass
+     * would never see it hover; SS_NOTIFY makes it hit-testable. */
+    SetWindowLongPtrA(row->label, GWL_STYLE, GetWindowLongPtrA(row->label, GWL_STYLE) | SS_NOTIFY);
+    HWND tip = CreateWindowExA(WS_EX_TOPMOST, TOOLTIPS_CLASSA, NULL,
+                               WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT,
+                               CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, parent, NULL,
+                               GetModuleHandleA(NULL), NULL);
+    if (!tip) {
+        return NULL;
+    }
+    TOOLINFOA ti = {0};
+    ti.cbSize = TTTOOLINFOA_V2_SIZE;
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd = parent;
+    ti.uId = (UINT_PTR)row->label;
+    ti.lpszText = "";
+    SendMessageA(tip, TTM_ADDTOOLA, 0, (LPARAM)&ti);
+    /* A maximum width is what makes a tooltip break its text on CRLF. */
+    SendMessageA(tip, TTM_SETMAXTIPWIDTH, 0, swapp_dpi_scale(400));
+    /* Long enough to read three lines; the default is gone in five seconds. */
+    SendMessageA(tip, TTM_SETDELAYTIME, TTDT_AUTOPOP, MAKELPARAM(30000, 0));
+    if (g_font) {
+        SendMessageA(tip, WM_SETFONT, (WPARAM)g_font, TRUE);
+    }
+    return tip;
+}
+
+/* Like swapp_set_text_if_changed: the refresh runs on every spinner tick, and
+ * an update makes a shown tooltip redraw. */
+static void swapp_row_set_tip(swapp_row *row, HWND tip, char *shown, size_t shown_size,
+                              const char *text) {
+    if (!tip || strcmp(shown, text) == 0) {
+        return;
+    }
+    strncpy_s(shown, shown_size, text, _TRUNCATE);
+    TOOLINFOA ti = {0};
+    ti.cbSize = TTTOOLINFOA_V2_SIZE;
+    ti.hwnd = GetParent(row->label);
+    ti.uId = (UINT_PTR)row->label;
+    ti.lpszText = shown;
+    SendMessageA(tip, TTM_UPDATETIPTEXTA, 0, (LPARAM)&ti);
+}
+
 /* The status refresh runs on every spinner tick; setting identical text
  * still makes the control erase and redraw, which blinks. */
 static void swapp_set_text_if_changed(HWND hwnd, const char *text) {
@@ -978,10 +1031,19 @@ static void swapp_main_refresh_status(void) {
 
     char audio[SWAPP_AUDIO_STATUS_MAX];
     swapp_audio_status_text(audio, sizeof(audio));
-    swapp_row_set(&g_audio_row,
-                  swapp_audio_ok() ? SWAPP_ICON_CHECK
-                                   : (swapp_audio_failed() ? SWAPP_ICON_ERROR : SWAPP_ICON_SPINNER),
-                  audio);
+    swapp_icon audio_icon = SWAPP_ICON_SPINNER;
+    if (swapp_audio_ok()) {
+        /* Still playing, but a frame came late or went missing in the last
+         * minute: the tooltip says how many. */
+        audio_icon = swapp_audio_degraded() ? SWAPP_ICON_CHECK_WARN : SWAPP_ICON_CHECK;
+    } else if (swapp_audio_failed()) {
+        audio_icon = SWAPP_ICON_ERROR;
+    }
+    swapp_row_set(&g_audio_row, audio_icon, audio);
+    char audio_detail[SWAPP_AUDIO_DETAIL_MAX];
+    swapp_audio_detail_text(audio_detail, sizeof(audio_detail));
+    swapp_row_set_tip(&g_audio_row, g_audio_tip, g_audio_tip_text, sizeof(g_audio_tip_text),
+                      audio_detail);
 
     /* A rescan only needs no scan already running: the result is the
      * server's own, whether or not there is a client to forward it to. */
@@ -1531,7 +1593,7 @@ static void swapp_show_main_window(void) {
         int client_width = swapp_dpi_scale(SWAPP_MAIN_WIDTH);
         int inner_width = client_width - 2 * margin;
 
-        INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_LISTVIEW_CLASSES};
+        INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES};
         InitCommonControlsEx(&icc);
         g_status_hwnd = CreateWindowExA(0, WC_LISTVIEWA, "",
                                         WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT
@@ -1584,6 +1646,7 @@ static void swapp_show_main_window(void) {
         int rows_width = buttons_left - margin;
         swapp_row_create(&g_client_row, g_main_hwnd, rows_top, rows_width);
         swapp_row_create(&g_audio_row, g_main_hwnd, rows_top + row_height, rows_width);
+        g_audio_tip = swapp_row_add_tip(&g_audio_row, g_main_hwnd);
         swapp_row_create(&g_monitors_row, g_main_hwnd, rows_top + 2 * row_height, rows_width);
 
         static const struct {
