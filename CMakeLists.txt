@@ -21,6 +21,21 @@ add_executable(swapp src/main.c src/monitors_common.c src/assets.c src/update_co
                src/audio_packet.c "${SWAPP_ASSETS_C}")
 target_include_directories(swapp PRIVATE src)
 
+# Opus for the audio relay: the client encodes, the server decodes. Fetched and
+# built from source on both OSes, so it links statically and nothing has to be
+# installed on either runner or machine.
+include(FetchContent)
+set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(opus
+    GIT_REPOSITORY https://github.com/xiph/opus.git
+    GIT_TAG v1.5.2
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(opus)
+target_link_libraries(swapp PRIVATE opus)
+
 # Plain C with no platform dependencies, so it builds without GTK or pulse.
 # CI runs it on the Linux job.
 enable_testing()
@@ -78,6 +93,9 @@ elseif(UNIX)
     # HTTPS for the update check and download.
     pkg_check_modules(CURL REQUIRED libcurl)
 
+    # The audio relay's output device and its capture (audio_linux.c).
+    pkg_check_modules(PULSE REQUIRED libpulse)
+
     # Prefer the actively maintained Ayatana fork (what current Ubuntu ships);
     # fall back to the original libappindicator3 elsewhere.
     pkg_check_modules(AYATANA_APPINDICATOR ayatana-appindicator3-0.1)
@@ -96,10 +114,10 @@ elseif(UNIX)
     endif()
 
     target_sources(swapp PRIVATE src/tray_linux.c src/monitors_linux.c src/net_linux.c src/audio_linux.c src/install_linux.c src/autostart_linux.c src/update_linux.c)
-    target_include_directories(swapp PRIVATE ${GTK3_INCLUDE_DIRS} ${APPINDICATOR_INCLUDE_DIRS} ${LIBNOTIFY_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} ${GLIB2_INCLUDE_DIRS} ${FONTCONFIG_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS})
-    target_link_directories(swapp PRIVATE ${GTK3_LIBRARY_DIRS} ${APPINDICATOR_LIBRARY_DIRS} ${LIBNOTIFY_LIBRARY_DIRS} ${X11_LIBRARY_DIRS} ${GLIB2_LIBRARY_DIRS} ${FONTCONFIG_LIBRARY_DIRS} ${CURL_LIBRARY_DIRS})
-    target_link_libraries(swapp PRIVATE ${GTK3_LIBRARIES} ${APPINDICATOR_LIBRARIES} ${LIBNOTIFY_LIBRARIES} ${X11_LIBRARIES} ${GLIB2_LIBRARIES} ${FONTCONFIG_LIBRARIES} ${CURL_LIBRARIES})
-    target_compile_options(swapp PRIVATE ${GTK3_CFLAGS_OTHER} ${APPINDICATOR_CFLAGS_OTHER} ${LIBNOTIFY_CFLAGS_OTHER} ${X11_CFLAGS_OTHER} ${GLIB2_CFLAGS_OTHER} ${FONTCONFIG_CFLAGS_OTHER} ${CURL_CFLAGS_OTHER})
+    target_include_directories(swapp PRIVATE ${GTK3_INCLUDE_DIRS} ${APPINDICATOR_INCLUDE_DIRS} ${LIBNOTIFY_INCLUDE_DIRS} ${X11_INCLUDE_DIRS} ${GLIB2_INCLUDE_DIRS} ${FONTCONFIG_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS} ${PULSE_INCLUDE_DIRS})
+    target_link_directories(swapp PRIVATE ${GTK3_LIBRARY_DIRS} ${APPINDICATOR_LIBRARY_DIRS} ${LIBNOTIFY_LIBRARY_DIRS} ${X11_LIBRARY_DIRS} ${GLIB2_LIBRARY_DIRS} ${FONTCONFIG_LIBRARY_DIRS} ${CURL_LIBRARY_DIRS} ${PULSE_LIBRARY_DIRS})
+    target_link_libraries(swapp PRIVATE ${GTK3_LIBRARIES} ${APPINDICATOR_LIBRARIES} ${LIBNOTIFY_LIBRARIES} ${X11_LIBRARIES} ${GLIB2_LIBRARIES} ${FONTCONFIG_LIBRARIES} ${CURL_LIBRARIES} ${PULSE_LIBRARIES})
+    target_compile_options(swapp PRIVATE ${GTK3_CFLAGS_OTHER} ${APPINDICATOR_CFLAGS_OTHER} ${LIBNOTIFY_CFLAGS_OTHER} ${X11_CFLAGS_OTHER} ${GLIB2_CFLAGS_OTHER} ${FONTCONFIG_CFLAGS_OTHER} ${CURL_CFLAGS_OTHER} ${PULSE_CFLAGS_OTHER})
     if(APPINDICATOR_HEADER_DEFINE)
         target_compile_definitions(swapp PRIVATE ${APPINDICATOR_HEADER_DEFINE})
     endif()

@@ -17,7 +17,7 @@
 - The server accepts a datagram only if its source IP is the currently connected TCP client's. Everything else is dropped before parsing.
 - Client UDP socket is bound to the local address of the live TCP socket (the LAN source address), never left unbound.
 - Null sink: `sink_name=swapp_relay`, description `Swapp Audio Relay`. Verified quoting on PipeWire 1.4.2 (`pactl info`): `sink_properties='device.description="Swapp Audio Relay"'`. The unquoted form gives just "Swapp".
-- Verified on this laptop: the null sink's monitor **ignores sink volume** (30% and 100% recorded identical peaks) but **honors mute**. The client must apply the sink's per-channel volume to captured samples itself.
+- Verified on this laptop (corrected during Task 5): the null sink's monitor **already applies the sink volume** (pipewire-pulse sets `monitor.channel-volumes` on it: a 0.5 tone recorded 0.5 at 100%, 0.0135 at 30%, 0 muted). The client must NOT apply any gain of its own. An earlier measurement said the opposite and was wrong.
 - The relay device is reused if it already exists, and removed only on the tray's Quit menu item. Update handover (`swapp_tray_stop_running` sending `'q'`, which calls `swapp_tray_on_quit(NULL, NULL)`) keeps it loaded.
 - `swapp_audio_stop()` returns within 500 ms no matter what. Nothing in audio may delay quit or Windows shutdown.
 - Every push to `main` replaces the only release. Each stage's last task leaves both binaries working as they do today plus the new piece.
@@ -303,7 +303,7 @@
 - [ ] **Step 7: CLAUDE.md.** Under Transport, add a short paragraph covering:
   - Audio is UDP, client to server only, on the same port number. Give the reason: WiFi retransmit stalls on TCP, and `nc`.
   - The server trusts only the connected client's IP.
-  - The null sink monitor ignores sink volume, so the client applies it.
+  - The null sink's monitor already carries the sink volume, so the client applies no gain (a double-applied volume was caught in Task 5).
   - The sink is kept across update handovers so music never falls back to the laptop speakers.
 - [ ] **Step 8: Commit and push (Stage 3 release).** `feat: steer playback rate to hold the relay's delay steady`. Then `gh run watch`.
 - [ ] **Step 9: Hardware gate.** Play music for an hour.
