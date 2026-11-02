@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "audio_jitter.h"
 #include "audio_packet.h"
 
 static int failures;
@@ -61,7 +62,173 @@ static void test_packet_too_small(void) {
     EXPECT(swapp_audio_packet_write(buf, sizeof buf, 1, 1, payload, 3) == 0);
 }
 
+static void jpush(swapp_jitter *j, uint32_t stream, uint32_t seq) {
+    uint8_t b = (uint8_t)seq;
+    swapp_jitter_push(j, stream, seq, &b, 1);
+}
+
+static void jprime(swapp_jitter *j, uint32_t first) {
+    for (uint32_t i = 0; i < 4; i++) jpush(j, 1, first + i);
+}
+
+/* Pops one frame and returns the result; the first payload byte lands in *b. */
+static swapp_jitter_result jpop(swapp_jitter *j, int *b) {
+    uint8_t out[SWAPP_AUDIO_MAX_PAYLOAD];
+    size_t len = 99;
+    swapp_jitter_result r = swapp_jitter_pop(j, out, &len);
+    if (r == SWAPP_JITTER_PACKET) {
+        EXPECT(len == 1);
+        if (b) *b = out[0];
+    } else {
+        EXPECT(len == 0);
+    }
+    return r;
+}
+
+static swapp_jitter jit;
+
+static void test_jitter_primes(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 4);
+    for (uint32_t i = 0; i < 3; i++) jpush(&jit, 1, i);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_SILENCE);
+    jpush(&jit, 1, 3);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(b == 0);
+}
+
+static void test_jitter_in_order(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 4);
+    for (uint32_t i = 0; i < 10; i++) jpush(&jit, 1, i);
+    for (int i = 0; i < 10; i++) {
+        EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+        EXPECT(b == i);
+    }
+}
+
+static void test_jitter_reorders(void) {
+    int b = -1;
+    const uint32_t order[4] = {0, 1, 3, 2};
+    swapp_jitter_init(&jit, 4);
+    for (int i = 0; i < 4; i++) jpush(&jit, 1, order[i]);
+    for (int i = 0; i < 4; i++) {
+        EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+        EXPECT(b == i);
+    }
+}
+
+static void test_jitter_loss_is_lost(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 4);
+    for (uint32_t i = 0; i < 4; i++) jpush(&jit, 1, i);
+    jpush(&jit, 1, 5);
+    for (int i = 0; i < 4; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(b == 5);
+}
+
+static void test_jitter_late_dropped(void) {
+    int b = -1, before;
+    swapp_jitter_init(&jit, 4);
+    jprime(&jit, 0);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    before = swapp_jitter_depth(&jit);
+    jpush(&jit, 1, 0);
+    EXPECT(swapp_jitter_depth(&jit) == before);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(b == 2);
+}
+
+static void test_jitter_duplicate_ignored(void) {
+    swapp_jitter_init(&jit, 4);
+    jpush(&jit, 1, 0);
+    jpush(&jit, 1, 0);
+    for (uint32_t i = 1; i < 4; i++) jpush(&jit, 1, i);
+    EXPECT(swapp_jitter_depth(&jit) == 4);
+}
+
+static void test_jitter_new_stream_resets(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 4);
+    jprime(&jit, 0);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    for (uint32_t i = 500; i < 504; i++) jpush(&jit, 2, i);
+    EXPECT(swapp_jitter_stream(&jit) == 2);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(b == (uint8_t)500);
+}
+
+static void test_jitter_far_jump_resyncs(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 4);
+    jprime(&jit, 10);
+    jpush(&jit, 1, 10 + SWAPP_JITTER_SLOTS);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_SILENCE);
+    for (uint32_t i = 75; i < 78; i++) jpush(&jit, 1, i);
+    EXPECT(swapp_jitter_depth(&jit) == 4);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    EXPECT(b == 74);
+}
+
+static void test_jitter_reprimes_after_gap(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 4);
+    jprime(&jit, 0);
+    for (int i = 0; i < 4; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    for (int i = 0; i < SWAPP_JITTER_MAX_LOST - 1; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
+    EXPECT(jpop(&jit, &b) == SWAPP_JITTER_SILENCE);
+}
+
+static void test_jitter_burst_after_gap(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 4);
+    jprime(&jit, 0);
+    for (int i = 0; i < 4; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+    for (int i = 0; i < 4; i++) EXPECT(jpop(&jit, &b) == SWAPP_JITTER_LOST);
+    for (uint32_t i = 8; i < 13; i++) jpush(&jit, 1, i);
+    for (int i = 8; i < 13; i++) {
+        EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+        EXPECT(b == i);
+    }
+}
+
+static void test_jitter_probe_ignored(void) {
+    uint8_t b = 0;
+    swapp_jitter_init(&jit, 4);
+    swapp_jitter_push(&jit, 7, 0, &b, 0);
+    EXPECT(swapp_jitter_depth(&jit) == 0);
+    EXPECT(swapp_jitter_stream(&jit) == 0);
+    jpush(&jit, 1, 0);
+    swapp_jitter_push(&jit, 1, 1, &b, SWAPP_AUDIO_MAX_PAYLOAD + 1);
+    EXPECT(swapp_jitter_depth(&jit) == 1);
+}
+
+static void test_jitter_seq_wraps(void) {
+    int b = -1;
+    swapp_jitter_init(&jit, 4);
+    jprime(&jit, 0xFFFFFFFEu);
+    for (int i = 0; i < 4; i++) {
+        EXPECT(jpop(&jit, &b) == SWAPP_JITTER_PACKET);
+        EXPECT(b == (uint8_t)(0xFFFFFFFEu + (uint32_t)i));
+    }
+}
+
 int main(void) {
+    test_jitter_primes();
+    test_jitter_in_order();
+    test_jitter_reorders();
+    test_jitter_loss_is_lost();
+    test_jitter_late_dropped();
+    test_jitter_duplicate_ignored();
+    test_jitter_new_stream_resets();
+    test_jitter_far_jump_resyncs();
+    test_jitter_reprimes_after_gap();
+    test_jitter_burst_after_gap();
+    test_jitter_probe_ignored();
+    test_jitter_seq_wraps();
     test_packet_roundtrip();
     test_packet_wire_bytes();
     test_packet_probe();

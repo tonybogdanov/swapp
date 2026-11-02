@@ -24,7 +24,7 @@ target_include_directories(swapp PRIVATE src)
 # Plain C with no platform dependencies, so it builds without GTK or pulse.
 # CI runs it on the Linux job.
 enable_testing()
-add_executable(swapp_audio_tests tests/audio_tests.c src/audio_packet.c)
+add_executable(swapp_audio_tests tests/audio_tests.c src/audio_packet.c src/audio_jitter.c)
 target_include_directories(swapp_audio_tests PRIVATE src)
 add_test(NAME audio COMMAND swapp_audio_tests)
 
@@ -50,7 +50,7 @@ target_compile_definitions(swapp PRIVATE SWAPP_COMMIT="${SWAPP_COMMIT}")
 if(WIN32)
     # The manifest opts into comctl32 v6, without which the monitor table
     # renders in the pre-XP classic style.
-    target_sources(swapp PRIVATE src/tray_win.c src/monitors_win.c src/net_win.c src/audio_win.c src/install_win.c src/autostart_win.c
+    target_sources(swapp PRIVATE src/tray_win.c src/monitors_win.c src/net_win.c src/audio_win.c src/audio_jitter.c src/install_win.c src/autostart_win.c
                    src/update_win.c src/swapp.manifest src/swapp.rc)
     target_link_libraries(swapp PRIVATE shell32 shlwapi winhttp user32 advapi32 dxva2 ws2_32 comctl32 uxtheme)
 
