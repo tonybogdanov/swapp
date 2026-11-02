@@ -8,6 +8,7 @@
 #include "tray.h"
 #include "monitors.h"
 #include "net.h"
+#include "audio.h"
 #include "assets.h"
 #include "gdiplus_min.h"
 #include "update.h"
@@ -52,6 +53,7 @@
 #define SWAPP_UPDATE_CLASS    "SwappUpdateWindow"
 /* The taskbar theme changed: reload the app icon variant. */
 #define SWAPP_THEME_MSG       (WM_APP + 14)
+#define SWAPP_AUDIO_STATE_MSG (WM_APP + 15)
 
 /* The main window. The monitor rows move in here once the client can drive
  * them; for now it shows the link status, which is the only thing the
@@ -646,6 +648,7 @@ typedef struct {
 
 static swapp_row g_client_row = {NULL, NULL, SWAPP_ICON_SPINNER};
 static swapp_row g_monitors_row = {NULL, NULL, SWAPP_ICON_SPINNER};
+static swapp_row g_audio_row = {NULL, NULL, SWAPP_ICON_SPINNER};
 
 /* Draws icon `which` into `hdc` at (x, y), `size` pixels square, in the
  * colour of icon `tint`. The spinner is drawn at its current rotation. */
@@ -973,6 +976,10 @@ static void swapp_main_refresh_status(void) {
                   !scanned ? SWAPP_ICON_SPINNER : incomplete ? SWAPP_ICON_ERROR : SWAPP_ICON_CHECK,
                   monitors);
 
+    char audio[128];
+    swapp_audio_status_text(audio, sizeof(audio));
+    swapp_row_set(&g_audio_row, swapp_audio_ok() ? SWAPP_ICON_CHECK : SWAPP_ICON_SPINNER, audio);
+
     /* A rescan only needs no scan already running: the result is the
      * server's own, whether or not there is a client to forward it to. */
     int can_rescan = !swapp_monitors_busy();
@@ -1027,7 +1034,7 @@ static void swapp_main_update_spinner(void) {
         return;
     }
     int pending = (swapp_net_get_state() == SWAPP_NET_WAITING) || swapp_monitors_busy()
-                  || swapp_monitors_count() == 0;
+                  || swapp_monitors_count() == 0 || !swapp_audio_ok();
     if (pending) {
         SetTimer(g_main_hwnd, SWAPP_MAIN_SPIN_TIMER, SWAPP_MAIN_SPIN_MS, NULL);
     } else {
@@ -1307,6 +1314,13 @@ static void swapp_refresh_draw(DRAWITEMSTRUCT *item) {
     swapp_icon_draw_tinted(hdc, glyph, disabled ? SWAPP_ICON_CHECK_MUTED : glyph, x, y, size);
 }
 
+/* Runs on the audio thread; the row is refreshed on the UI thread. */
+static void swapp_audio_state_changed(void) {
+    if (g_tray_hwnd) {
+        PostMessageA(g_tray_hwnd, SWAPP_AUDIO_STATE_MSG, 0, 0);
+    }
+}
+
 static void swapp_net_state_changed(void) {
     if (g_tray_hwnd) {
         PostMessageA(g_tray_hwnd, SWAPP_NET_STATE_MSG, 0, 0);
@@ -1566,6 +1580,7 @@ static void swapp_show_main_window(void) {
         int rows_width = buttons_left - margin;
         swapp_row_create(&g_client_row, g_main_hwnd, rows_top, rows_width);
         swapp_row_create(&g_monitors_row, g_main_hwnd, rows_top + row_height, rows_width);
+        swapp_row_create(&g_audio_row, g_main_hwnd, rows_top + 2 * row_height, rows_width);
 
         static const struct {
             const char *text;
@@ -1579,7 +1594,7 @@ static void swapp_show_main_window(void) {
             HWND button = CreateWindowExA(0, "BUTTON", buttons[b].text,
                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                           buttons_left + b * (button_width + button_gap), rows_top,
-                                          button_width, 2 * row_height, g_main_hwnd,
+                                          button_width, 3 * row_height, g_main_hwnd,
                                           (HMENU)(INT_PTR)buttons[b].id,
                                           GetModuleHandleA(NULL), NULL);
             if (buttons[b].id == SWAPP_MAIN_WINDOWS_ALL_ID) {
@@ -1593,7 +1608,7 @@ static void swapp_show_main_window(void) {
 
         /* The window is sized from its content rather than the other way
          * round. */
-        RECT frame = {0, 0, client_width, rows_top + 2 * row_height + margin};
+        RECT frame = {0, 0, client_width, rows_top + 3 * row_height + margin};
         AdjustWindowRectEx(&frame, SWAPP_MAIN_STYLE, FALSE, 0);
         SetWindowPos(g_main_hwnd, NULL, 0, 0, frame.right - frame.left, frame.bottom - frame.top,
                      SWP_NOMOVE | SWP_NOZORDER);
@@ -2047,6 +2062,11 @@ static LRESULT CALLBACK swapp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             swapp_main_update_spinner();
             return 0;
 
+        case SWAPP_AUDIO_STATE_MSG:
+            swapp_main_refresh_status();
+            swapp_main_update_spinner();
+            return 0;
+
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
@@ -2195,6 +2215,8 @@ void swapp_tray_run(const char *tooltip) {
     swapp_net_set_switch_all_callback(swapp_net_switch_all_requested);
     /* Starts in the tray: the window only opens from the tray icon. */
     swapp_net_start();
+    swapp_audio_set_state_callback(swapp_audio_state_changed);
+    swapp_audio_start();
 
     /* The server owns the monitors, so it scans them at startup rather than
      * when a client turns up: probing capabilities over DDC/CI takes
@@ -2210,6 +2232,7 @@ void swapp_tray_run(const char *tooltip) {
     }
 
     swapp_net_stop();
+    swapp_audio_stop(0);
 
     if (g_dev_notify) {
         UnregisterDeviceNotification(g_dev_notify);

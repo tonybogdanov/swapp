@@ -1,6 +1,7 @@
 #include "tray.h"
 #include "monitors.h"
 #include "net.h"
+#include "audio.h"
 #include "assets.h"
 #include "update.h"
 #include "autostart.h"
@@ -435,6 +436,8 @@ static GtkWidget *g_status_label = NULL;
 static GtkWidget *g_status_icon = NULL;
 static GtkWidget *g_monitors_label = NULL;
 static GtkWidget *g_monitors_icon = NULL;
+static GtkWidget *g_audio_label = NULL;
+static GtkWidget *g_audio_icon = NULL;
 static GtkListStore *g_monitor_store = NULL;
 
 /* The window is one line per thing that has to be true before Swapp can do
@@ -1215,6 +1218,11 @@ static void swapp_tray_refresh_status(void) {
     swapp_main_set_line(g_status_icon, g_status_label,
                         connected ? SWAPP_ICON_CHECK : SWAPP_ICON_SPINNER, status);
 
+    char audio[128];
+    swapp_audio_status_text(audio, sizeof(audio));
+    swapp_main_set_line(g_audio_icon, g_audio_label,
+                        swapp_audio_ok() ? SWAPP_ICON_CHECK : SWAPP_ICON_SPINNER, audio);
+
     int ready = swapp_net_monitors_ready();
     if (!connected) {
         swapp_main_set_line(g_monitors_icon, g_monitors_label, SWAPP_ICON_SPINNER,
@@ -1283,6 +1291,7 @@ static gboolean swapp_main_spin(gpointer user_data) {
     }
     gtk_widget_queue_draw(g_status_icon);
     gtk_widget_queue_draw(g_monitors_icon);
+    gtk_widget_queue_draw(g_audio_icon);
     return G_SOURCE_CONTINUE;
 }
 
@@ -1292,7 +1301,7 @@ static gboolean swapp_main_spin(gpointer user_data) {
  * starts serving the list. */
 static void swapp_main_update_spinner(void) {
     int pending = (swapp_net_get_state() != SWAPP_NET_CONNECTED)
-                  || !swapp_net_monitors_ready();
+                  || !swapp_net_monitors_ready() || !swapp_audio_ok();
 
     if (pending && g_spinner_source == 0) {
         g_spinner_source = g_timeout_add(120, swapp_main_spin, NULL);
@@ -1373,6 +1382,7 @@ static void swapp_show_main_window(void) {
         gtk_box_pack_start(GTK_BOX(bottom), rows, TRUE, TRUE, 0);
         g_status_icon = swapp_row_new(rows, &g_status_label);
         g_monitors_icon = swapp_row_new(rows, &g_monitors_label);
+        g_audio_icon = swapp_row_new(rows, &g_audio_label);
 
         /* The big buttons, right of the rows: all-to-Windows, all-to-Linux,
          * then refresh at the far right -- same order as the server. */
@@ -1510,7 +1520,6 @@ static void swapp_tray_on_switch_all(GtkMenuItem *item, gpointer user_data) {
 }
 
 static void swapp_tray_on_quit(GtkMenuItem *item, gpointer user_data) {
-    (void)item;
     (void)user_data;
     /* Quit has to work mid-job. The loop isn't blocked -- the job is on a
      * worker thread -- but cancelling stops it at its next checkpoint so it
@@ -1518,6 +1527,10 @@ static void swapp_tray_on_quit(GtkMenuItem *item, gpointer user_data) {
      * gone. */
     swapp_monitors_cancel();
     swapp_net_stop();
+    /* item is NULL when the single-instance 'q' command invokes this for an
+     * update handover: the new copy takes over the same audio device, so it
+     * must not be removed here. A real quit from the menu removes it. */
+    swapp_audio_stop(item != NULL);
     gtk_main_quit();
 }
 
@@ -1911,8 +1924,10 @@ void swapp_tray_run(const char *tooltip) {
     /* The client does nothing on its own: it holds no monitor state, so
      * until the server answers there is nothing to show but the search. */
     swapp_net_set_state_callback(swapp_tray_refresh_status);
+    swapp_audio_set_state_callback(swapp_tray_refresh_status);
     /* Starts in the tray: the window only opens from the tray menu. */
     swapp_net_start();
+    swapp_audio_start();
     swapp_hotkey_start();
 
     /* The tray icon and the window go up immediately and the enumeration
