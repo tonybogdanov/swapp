@@ -23,6 +23,28 @@
  * app's outbound socket can be assigned it and block the bind. */
 #define SWAPP_NET_PORT 21423
 
+/* The audio relay datagram (laptop audio played on the Windows PC; layout in
+ * audio_packet.h). It is UDP on the same port number as the TCP link, so the
+ * port-range reasoning above applies to both.
+ *
+ * Only the client sends. The laptop's firewall drops unsolicited inbound
+ * traffic, so the server never sends an audio-side packet; anything it has to
+ * say goes over the TCP link.
+ *
+ * Each datagram is a 12-byte header (magic "SWA1", stream id, sequence
+ * number, u32 big-endian each) and one 10 ms Opus frame. A datagram with an
+ * empty payload is a probe: it carries no audio.
+ *
+ * The server accepts datagrams only from the IP address of the currently
+ * connected TCP client, and only while that client is connected; anything
+ * else is dropped without being decoded.
+ *
+ * Audio is not on the TCP link for two reasons. A single lost packet on WiFi
+ * stalls TCP for a retransmit, which would force a large jitter buffer,
+ * whereas a lost UDP packet is concealed by Opus and the buffer stays small.
+ * And binary frames in the text stream would break `nc <server> 21423` as a
+ * debugging client. */
+
 /* Keepalive. Silence is the only disconnect signal that works: a machine
  * that sleeps, loses its link or is switched away from never gets to send
  * a goodbye, and a TCP socket can stay open for minutes past that. Each

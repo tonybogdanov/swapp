@@ -18,8 +18,15 @@ add_custom_command(
     COMMENT "Embedding assets")
 
 add_executable(swapp src/main.c src/monitors_common.c src/assets.c src/update_common.c
-               "${SWAPP_ASSETS_C}")
+               src/audio_packet.c "${SWAPP_ASSETS_C}")
 target_include_directories(swapp PRIVATE src)
+
+# Plain C with no platform dependencies, so it builds without GTK or pulse.
+# CI runs it on the Linux job.
+enable_testing()
+add_executable(swapp_audio_tests tests/audio_tests.c src/audio_packet.c)
+target_include_directories(swapp_audio_tests PRIVATE src)
+add_test(NAME audio COMMAND swapp_audio_tests)
 
 # The short commit hash is the version (no semver): the update check compares
 # it with the release's version.txt. Resolved at configure time;
