@@ -976,7 +976,7 @@ static void swapp_main_refresh_status(void) {
                   !scanned ? SWAPP_ICON_SPINNER : incomplete ? SWAPP_ICON_ERROR : SWAPP_ICON_CHECK,
                   monitors);
 
-    char audio[128];
+    char audio[SWAPP_AUDIO_STATUS_MAX];
     swapp_audio_status_text(audio, sizeof(audio));
     swapp_row_set(&g_audio_row, swapp_audio_ok() ? SWAPP_ICON_CHECK : SWAPP_ICON_SPINNER, audio);
 

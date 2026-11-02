@@ -72,7 +72,7 @@ static HANDLE g_stop_event = NULL;
 static HANDLE g_change_event = NULL;
 static volatile LONG g_stop = 0;
 static int g_ok = 0;
-static char g_text[192] = "Audio: waiting for the client";
+static char g_text[SWAPP_AUDIO_STATUS_MAX] = "Audio: waiting for the client";
 static void (*g_state_callback)(void) = NULL;
 
 /* What each thread reports, combined into the status text. */
@@ -93,9 +93,15 @@ static swapp_jitter g_jitter;
  * the dot goes through the ANSI code page like the device name does; a code
  * page without it gets a plain hyphen. */
 static void swapp_audio_append_buffered(char *text, size_t size, size_t at, int ms) {
-    char sep[16] = " - ";
-    WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, L" \u00b7 ", -1, sep, (int)sizeof sep, NULL,
-                        NULL);
+    char sep[16];
+    BOOL used = FALSE;
+    /* used reports a character the code page replaced with a default; it must
+     * be NULL for UTF-8, where the parameter is not allowed. */
+    int r = WideCharToMultiByte(CP_ACP, 0, L" \u00b7 ", -1, sep, (int)sizeof sep, NULL,
+                                GetACP() == CP_UTF8 ? NULL : &used);
+    if (!r || used) {
+        strcpy(sep, " - ");
+    }
     _snprintf_s(text + at, size - at, _TRUNCATE, "%s%d ms buffered", sep, ms);
 }
 
@@ -350,7 +356,7 @@ static void swapp_output_drift_reset(swapp_output *o) {
     }
     o->rate_nudged = 0;
     if (was_shown) {
-        swapp_audio_set_drift_status(-1, 0);
+        swapp_audio_set_drift_status(-1, o->adjust == NULL);
     }
 }
 
@@ -370,13 +376,22 @@ static int swapp_output_decode(swapp_output *o, float *pcm, UINT32 padding) {
     } else {
         /* Frames still in the jitter buffer plus what the device holds. */
         double fill_ms = depth * 10.0 + padding * 1000.0 / SWAPP_AUDIO_RATE;
-        double ratio = swapp_drift_update(&o->drift, fill_ms, SWAPP_AUDIO_TARGET_MS + 20);
+        /* The jitter target plus the device buffer that is actually held. */
+        double target_ms = SWAPP_AUDIO_TARGET_MS + o->buffer_frames * 1000.0 / SWAPP_AUDIO_RATE;
+        double ratio = swapp_drift_update(&o->drift, fill_ms, target_ms);
         if (++o->frames >= DRIFT_STEP_FRAMES) {
             o->frames = 0;
-            if (o->adjust &&
-                SUCCEEDED(IAudioClockAdjustment_SetSampleRate(o->adjust,
-                                                              (float)(SWAPP_AUDIO_RATE * ratio)))) {
-                o->rate_nudged = 1;
+            if (o->adjust) {
+                if (SUCCEEDED(IAudioClockAdjustment_SetSampleRate(
+                        o->adjust, (float)(SWAPP_AUDIO_RATE * ratio)))) {
+                    o->rate_nudged = 1;
+                } else {
+                    /* Without a working rate there is no drift control, and
+                     * the status says so until the next open. */
+                    IAudioClockAdjustment_Release(o->adjust);
+                    o->adjust = NULL;
+                    o->rate_nudged = 0;
+                }
             }
             swapp_audio_set_drift_status((int)(o->drift.smoothed_ms + 0.5), o->adjust == NULL);
         }

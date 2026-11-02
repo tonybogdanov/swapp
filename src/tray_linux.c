@@ -1218,7 +1218,7 @@ static void swapp_tray_refresh_status(void) {
     swapp_main_set_line(g_status_icon, g_status_label,
                         connected ? SWAPP_ICON_CHECK : SWAPP_ICON_SPINNER, status);
 
-    char audio[128];
+    char audio[SWAPP_AUDIO_STATUS_MAX];
     swapp_audio_status_text(audio, sizeof(audio));
     swapp_main_set_line(g_audio_icon, g_audio_label,
                         swapp_audio_ok() ? SWAPP_ICON_CHECK : SWAPP_ICON_SPINNER, audio);

@@ -17,6 +17,8 @@
 #define SWAPP_AUDIO_BITRATE 256000
 #define SWAPP_AUDIO_FRAME 480      /* samples per channel per datagram: 10 ms */
 #define SWAPP_AUDIO_TARGET_MS 40   /* jitter-buffer target; tuned in Stage 2 */
+/* Room for the longest status text swapp_audio_status_text can produce. */
+#define SWAPP_AUDIO_STATUS_MAX 192
 #define SWAPP_AUDIO_SILENT_MS 3000 /* server: connected client, no datagram for this long */
 
 /* Starts the audio threads. Returns immediately. */

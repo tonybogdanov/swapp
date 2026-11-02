@@ -250,6 +250,15 @@ static void test_drift_clamped(void) {
     EXPECT(run_drift(&d, 500, 1000, 40) == 1.005);
 }
 
+static void test_drift_step(void) {
+    swapp_drift d;
+    double r;
+    swapp_drift_reset(&d);
+    run_drift(&d, 200, 40, 40);
+    r = run_drift(&d, 500, 60, 40);
+    EXPECT(r > 1.0019 && r < 1.0020);
+}
+
 static void test_drift_spike_smoothed(void) {
     swapp_drift d;
     swapp_drift_reset(&d);
@@ -275,6 +284,7 @@ int main(void) {
     test_drift_too_empty_slows();
     test_drift_clamped();
     test_drift_spike_smoothed();
+    test_drift_step();
     test_packet_roundtrip();
     test_packet_wire_bytes();
     test_packet_probe();
